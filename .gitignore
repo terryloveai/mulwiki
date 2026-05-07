@@ -1,0 +1,7 @@
+node_modules
+.next
+.turbo
+mulwiki.db
+server/data/repos
+.env
+*.zst

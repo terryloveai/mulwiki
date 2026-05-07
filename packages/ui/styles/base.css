@@ -1,0 +1,37 @@
+/* Mulwiki shared base styles */
+
+/* Shiki dual themes: CSS-only light/dark switching via CSS variables */
+.shiki,
+.shiki span {
+  color: var(--shiki-light);
+}
+
+.dark .shiki,
+.dark .shiki span {
+  color: var(--shiki-dark) !important;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+  *::-webkit-scrollbar { width: 6px; height: 6px; }
+  *::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+  *::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+  *::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+    text-autospace: ideograph-alpha ideograph-numeric;
+  }
+}
+
+/* Sidebar: open triggers get active background */
+[data-sidebar="menu-button"][data-popup-open] {
+  background-color: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@mulwiki/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./styles/*": "./styles/*",
+    "./components/*": "./components/*",
+    "./hooks/*": "./hooks/*",
+    "./lib/*": "./lib/*"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^3.0.0",
+    "lucide-react": "^0.468.0"
+  },
+  "peerDependencies": {
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "next": "^15.1.0",
+    "typescript": "^5.7.0"
+  }
+}
