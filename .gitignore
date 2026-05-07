@@ -5,3 +5,7 @@ mulwiki.db
 server/data/repos
 .env
 *.zst
+
+# SQLite WAL files
+*.db-shm
+*.db-wal
