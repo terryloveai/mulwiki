@@ -40,12 +40,12 @@ const (
 
 // Client represents a single WebSocket connection.
 type Client struct {
-	conn     *websocket.Conn
-	send     chan []byte
-	scopes   map[string]struct{} // "workspace:ws1", "agent:agent1"
-	hub      *Hub
-	done     chan struct{}
-	once     sync.Once
+	conn   *websocket.Conn
+	send   chan []byte
+	scopes map[string]struct{} // "workspace:ws1", "agent:agent1"
+	hub    *Hub
+	done   chan struct{}
+	once   sync.Once
 }
 
 // Hub manages all WebSocket connections and routes broadcast
@@ -89,6 +89,7 @@ func (h *Hub) subscribeToBus() {
 		events.EventTaskStarted,
 		events.EventTaskCompleted,
 		events.EventTaskFailed,
+		events.EventTaskCancelled,
 		events.EventDaemonOnline,
 		events.EventDaemonOffline,
 	}

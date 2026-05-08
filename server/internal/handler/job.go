@@ -175,7 +175,7 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j, err := service.NewJobService(h.DB).CreateJob(service.CreateJobInput{
+	j, err := service.NewJobServiceWithBus(h.DB, h.EventBus).CreateJob(service.CreateJobInput{
 		WorkspaceID:  workspaceID,
 		AgentID:      req.AgentID,
 		SourcePath:   req.SourcePath,
@@ -184,6 +184,10 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		InitialClaim: req.ClaimedBy,
 	})
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusBadRequest, "agent not found in workspace")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create job: %v", err))
 		return
 	}

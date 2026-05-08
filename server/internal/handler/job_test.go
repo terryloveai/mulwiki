@@ -18,6 +18,7 @@ import (
 
 func TestCreateJob(t *testing.T) {
 	h := newTestHandler(t)
+	seedJobAgent(t, h, "agent1", "rt-job-1")
 
 	body := `{"source_path":"src1","schema_id":"sch1","agent_id":"agent1"}`
 	req := chiRequest(http.MethodPost, "/api/workspaces/test-workspace/jobs", map[string]string{"slug": "test-workspace"}, strings.NewReader(body))
@@ -49,10 +50,19 @@ func TestCreateJob(t *testing.T) {
 	if j.Progress != 0 {
 		t.Errorf("expected progress 0, got %d", j.Progress)
 	}
+
+	var taskJobID, taskStatus, taskAgentID string
+	if err := h.DB.QueryRow(`SELECT job_id, status, agent_id FROM agent_tasks WHERE job_id = ?`, j.ID).Scan(&taskJobID, &taskStatus, &taskAgentID); err != nil {
+		t.Fatalf("expected agent task for job: %v", err)
+	}
+	if taskJobID != j.ID || taskStatus != "queued" || taskAgentID != "agent1" {
+		t.Fatalf("unexpected agent task row: job=%q status=%q agent=%q", taskJobID, taskStatus, taskAgentID)
+	}
 }
 
 func TestCreateJob_WithSourcePaths(t *testing.T) {
 	h := newTestHandler(t)
+	seedJobAgent(t, h, "agent1", "rt-job-1")
 
 	body := `{"source_paths":["src1","src2","src3"],"agent_id":"agent1","schema_id":"sch1"}`
 	req := chiRequest(http.MethodPost, "/api/workspaces/test-workspace/jobs", map[string]string{"slug": "test-workspace"}, strings.NewReader(body))
@@ -84,6 +94,17 @@ func TestCreateJob_MissingAgentID(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}
+
+func seedJobAgent(t *testing.T, h *Handler, agentID, runtimeID string) {
+	t.Helper()
+
+	if _, err := h.DB.Exec(`INSERT INTO agent_runtimes (id, workspace_id, name, backend, path) VALUES (?, 'ws1', 'Runtime', 'codex', '/bin/codex')`, runtimeID); err != nil {
+		t.Fatalf("seed runtime: %v", err)
+	}
+	if _, err := h.DB.Exec(`INSERT INTO agents (id, workspace_id, name, runtime_id, runtime_mode) VALUES (?, 'ws1', 'Agent', ?, 'codex')`, agentID, runtimeID); err != nil {
+		t.Fatalf("seed agent: %v", err)
 	}
 }
 

@@ -9,7 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tethy/mulwiki/server/internal/events"
+	"github.com/tethy/mulwiki/server/internal/service"
+	"github.com/tethy/mulwiki/server/internal/store"
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
@@ -660,6 +661,7 @@ func (h *Handler) CreateAgentTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
+		JobID        string                           `json:"job_id"`
 		SourcePath   string                           `json:"source_path"`
 		SchemaID     string                           `json:"schema_id"`
 		RuntimeID    string                           `json:"runtime_id"`
@@ -687,49 +689,51 @@ func (h *Handler) CreateAgentTask(w http.ResponseWriter, r *http.Request) {
 		req.MaxAttempts = 3
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	taskStore := store.NewTaskStore(h.DB)
+	taskService := service.NewTaskService(h.DB, h.EventBus)
 
-	var t protocol.AgentTask
-	var runtimeID, dispatchedAt, startedAt, completedAt, parentTaskID sql.NullString
-	err := h.DB.QueryRow(
-		`INSERT INTO agent_tasks (agent_id, runtime_id, workspace_id, source_path, schema_id,
-		                          status, priority, parent_task_id, session_id, work_dir,
-		                          daemon_id, dispatched_at, attempt, max_attempts, created_at)
-		 VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, 1, ?, ?)
-		 RETURNING id, agent_id, runtime_id, workspace_id, source_path, schema_id,
-		           status, priority, parent_task_id, session_id, work_dir,
-		           failure_reason, daemon_id, dispatched_at, started_at, completed_at,
-		           result, error, attempt, max_attempts, created_at`,
-		id, nullStr(req.RuntimeID), workspaceID, req.SourcePath, req.SchemaID,
-		req.Priority, nullStr(req.ParentTaskID), req.SessionID, req.WorkDir,
-		req.DaemonID, now, req.MaxAttempts, now,
-	).Scan(
-		&t.ID, &t.AgentID, &runtimeID, &t.WorkspaceID, &t.SourcePath, &t.SchemaID,
-		&t.Status, &t.Priority, &parentTaskID, &t.SessionID, &t.WorkDir,
-		&t.FailureReason, &t.DaemonID, &dispatchedAt, &startedAt, &completedAt,
-		&t.Result, &t.Error, &t.Attempt, &t.MaxAttempts, &t.CreatedAt,
-	)
-	if err != nil {
-		slog.Error("CreateAgentTask insert failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to create task")
-		return
+	var t *protocol.AgentTask
+	if req.JobID != "" {
+		existing, err := taskStore.GetByJob(r.Context(), workspaceID, req.JobID, id)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to load existing task")
+			return
+		}
+		if err == nil {
+			t = existing
+		}
 	}
 
-	if runtimeID.Valid {
-		t.RuntimeID = &runtimeID.String
+	if t == nil {
+		now := time.Now().UTC().Format(time.RFC3339)
+		row := h.DB.QueryRow(
+			`INSERT INTO agent_tasks (job_id, agent_id, runtime_id, workspace_id, source_path, schema_id,
+			                          status, priority, parent_task_id, session_id, work_dir,
+			                          attempt, max_attempts, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, 1, ?, ?)
+			 RETURNING `+store.AgentTaskColumns,
+			req.JobID, id, nullStr(req.RuntimeID), workspaceID, req.SourcePath, req.SchemaID,
+			req.Priority, nullStr(req.ParentTaskID), req.SessionID, req.WorkDir,
+			req.MaxAttempts, now,
+		)
+		var err error
+		t, err = store.ScanAgentTask(row.Scan)
+		if err != nil {
+			slog.Error("CreateAgentTask insert failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to create task")
+			return
+		}
 	}
-	if dispatchedAt.Valid {
-		t.DispatchedAt = &dispatchedAt.String
+
+	if req.DaemonID != "" && t.Status == "queued" {
+		var err error
+		t, err = taskService.Dispatch(r.Context(), t.ID, workspaceID, req.DaemonID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to dispatch task")
+			return
+		}
 	}
-	if startedAt.Valid {
-		t.StartedAt = &startedAt.String
-	}
-	if completedAt.Valid {
-		t.CompletedAt = &completedAt.String
-	}
-	if parentTaskID.Valid {
-		t.ParentTaskID = &parentTaskID.String
-	}
+
 	if err := h.insertAgentTaskMessages(workspaceID, id, t.ID, req.Messages); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -740,17 +744,6 @@ func (h *Handler) CreateAgentTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.Messages = messages
-
-	// Publish event if bus is wired.
-	if h.EventBus != nil {
-		h.EventBus.Publish(events.Event{
-			Type:        events.EventTaskDispatched,
-			WorkspaceID: workspaceID,
-			AgentID:     id,
-			TaskID:      t.ID,
-			Payload:     t,
-		})
-	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{"task": t})
 }
@@ -796,109 +789,53 @@ func (h *Handler) UpdateAgentTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	var setClauses []string
-	var args []any
-
-	if req.Status != "" {
-		setClauses = append(setClauses, "status = ?")
-		args = append(args, req.Status)
-
-		switch req.Status {
-		case "running":
-			setClauses = append(setClauses, "started_at = ?")
-			args = append(args, now)
-		case "completed":
-			setClauses = append(setClauses, "completed_at = ?")
-			args = append(args, now)
-		case "failed":
-			setClauses = append(setClauses, "completed_at = ?")
-			args = append(args, now)
-		}
-	}
-	if req.Result != "" {
-		setClauses = append(setClauses, "result = ?")
-		args = append(args, req.Result)
-	}
-	if req.Error != "" {
-		setClauses = append(setClauses, "error = ?")
-		args = append(args, req.Error)
-	}
-	if req.Attempt > 0 {
-		setClauses = append(setClauses, "attempt = ?")
-		args = append(args, req.Attempt)
-	}
-	if req.ParentTaskID != "" {
-		setClauses = append(setClauses, "parent_task_id = ?")
-		args = append(args, req.ParentTaskID)
-	}
-	if req.SessionID != "" {
-		setClauses = append(setClauses, "session_id = ?")
-		args = append(args, req.SessionID)
-	}
-	if req.WorkDir != "" {
-		setClauses = append(setClauses, "work_dir = ?")
-		args = append(args, req.WorkDir)
-	}
-	if req.FailureReason != "" {
-		setClauses = append(setClauses, "failure_reason = ?")
-		args = append(args, req.FailureReason)
-	}
-	if req.DaemonID != "" {
-		setClauses = append(setClauses, "daemon_id = ?")
-		args = append(args, req.DaemonID)
-	}
-
-	if len(setClauses) == 0 && len(req.Messages) == 0 {
+	hasMetadata := req.Result != "" || req.Error != "" || req.Attempt > 0 || req.ParentTaskID != "" ||
+		req.SessionID != "" || req.WorkDir != "" || req.FailureReason != "" || req.DaemonID != ""
+	if req.Status == "" && !hasMetadata && len(req.Messages) == 0 {
 		writeError(w, http.StatusBadRequest, "no fields to update")
 		return
 	}
 
-	if len(setClauses) > 0 {
-		args = append(args, taskID)
-		query := `UPDATE agent_tasks SET ` + strings.Join(setClauses, ", ") + ` WHERE id = ?`
+	taskService := service.NewTaskService(h.DB, h.EventBus)
+	var t *protocol.AgentTask
+	var err error
 
-		if _, err := h.DB.Exec(query, args...); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update task")
+	switch req.Status {
+	case "":
+	case "running":
+		t, err = taskService.Start(r.Context(), taskID, workspaceID)
+	case "completed":
+		t, err = taskService.Complete(r.Context(), taskID, workspaceID, req.Result, req.SessionID, req.WorkDir)
+	case "failed":
+		t, err = taskService.Fail(r.Context(), taskID, workspaceID, req.FailureReason, req.Error, req.SessionID, req.WorkDir)
+	case "cancelled":
+		t, err = taskService.Cancel(r.Context(), taskID, workspaceID)
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported task status")
+		return
+	}
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "task not found")
 			return
 		}
-	}
-
-	// Return updated task
-	var t protocol.AgentTask
-	var runtimeID, dispatchedAt, startedAt, completedAt, parentTaskID sql.NullString
-	err := h.DB.QueryRow(
-		`SELECT id, agent_id, runtime_id, workspace_id, source_path, schema_id,
-		        status, priority, parent_task_id, session_id, work_dir,
-		        failure_reason, daemon_id, dispatched_at, started_at, completed_at,
-		        result, error, attempt, max_attempts, created_at
-		 FROM agent_tasks WHERE id = ?`, taskID,
-	).Scan(
-		&t.ID, &t.AgentID, &runtimeID, &t.WorkspaceID, &t.SourcePath, &t.SchemaID,
-		&t.Status, &t.Priority, &parentTaskID, &t.SessionID, &t.WorkDir,
-		&t.FailureReason, &t.DaemonID, &dispatchedAt, &startedAt, &completedAt,
-		&t.Result, &t.Error, &t.Attempt, &t.MaxAttempts, &t.CreatedAt,
-	)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "task not found after update")
+		if errors.Is(err, service.ErrInvalidTaskTransition) {
+			writeError(w, http.StatusConflict, "invalid task status transition")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to update task")
 		return
 	}
 
-	if runtimeID.Valid {
-		t.RuntimeID = &runtimeID.String
+	if err := h.updateAgentTaskMetadata(taskID, req.Status, req.Result, req.Error, req.Attempt, req.ParentTaskID, req.SessionID, req.WorkDir, req.FailureReason, req.DaemonID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update task metadata")
+		return
 	}
-	if dispatchedAt.Valid {
-		t.DispatchedAt = &dispatchedAt.String
-	}
-	if startedAt.Valid {
-		t.StartedAt = &startedAt.String
-	}
-	if completedAt.Valid {
-		t.CompletedAt = &completedAt.String
-	}
-	if parentTaskID.Valid {
-		t.ParentTaskID = &parentTaskID.String
+
+	t, err = store.NewTaskStore(h.DB).GetInWorkspace(r.Context(), workspaceID, taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "task not found after update")
+		return
 	}
 	if err := h.insertAgentTaskMessages(workspaceID, id, t.ID, req.Messages); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -911,29 +848,57 @@ func (h *Handler) UpdateAgentTask(w http.ResponseWriter, r *http.Request) {
 	}
 	t.Messages = messages
 
-	// Publish event based on status transition.
-	if h.EventBus != nil && req.Status != "" {
-		var eventType events.EventType
-		switch req.Status {
-		case "running":
-			eventType = events.EventTaskStarted
-		case "completed":
-			eventType = events.EventTaskCompleted
-		case "failed":
-			eventType = events.EventTaskFailed
+	writeJSON(w, http.StatusOK, map[string]any{"task": t})
+}
+
+func (h *Handler) updateAgentTaskMetadata(taskID, status, resultText, taskError string, attempt int, parentTaskID, sessionID, workDir, failureReason, daemonID string) error {
+	var setClauses []string
+	var args []any
+
+	if status == "" {
+		if resultText != "" {
+			setClauses = append(setClauses, "result = ?")
+			args = append(args, resultText)
 		}
-		if eventType != "" {
-			h.EventBus.Publish(events.Event{
-				Type:        eventType,
-				WorkspaceID: workspaceID,
-				AgentID:     id,
-				TaskID:      taskID,
-				Payload:     t,
-			})
+		if taskError != "" {
+			setClauses = append(setClauses, "error = ?")
+			args = append(args, taskError)
+		}
+		if failureReason != "" {
+			setClauses = append(setClauses, "failure_reason = ?")
+			args = append(args, failureReason)
 		}
 	}
+	if status == "" || status == "running" {
+		if sessionID != "" {
+			setClauses = append(setClauses, "session_id = ?")
+			args = append(args, sessionID)
+		}
+		if workDir != "" {
+			setClauses = append(setClauses, "work_dir = ?")
+			args = append(args, workDir)
+		}
+	}
+	if attempt > 0 {
+		setClauses = append(setClauses, "attempt = ?")
+		args = append(args, attempt)
+	}
+	if parentTaskID != "" {
+		setClauses = append(setClauses, "parent_task_id = ?")
+		args = append(args, parentTaskID)
+	}
+	if daemonID != "" {
+		setClauses = append(setClauses, "daemon_id = ?")
+		args = append(args, daemonID)
+	}
+	if len(setClauses) == 0 {
+		return nil
+	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"task": t})
+	args = append(args, taskID)
+	query := `UPDATE agent_tasks SET ` + strings.Join(setClauses, ", ") + ` WHERE id = ?`
+	_, err := h.DB.Exec(query, args...)
+	return err
 }
 
 func (h *Handler) insertAgentTaskMessages(workspaceID, agentID, taskID string, messages []protocol.AgentTaskMessageInput) error {
@@ -1003,12 +968,11 @@ func (h *Handler) ClaimAgentTask(w http.ResponseWriter, r *http.Request) {
 	id := idParam(r, "id")
 
 	var workspaceID string
-	var maxConcurrent int
 	if err := h.DB.QueryRow(
-		`SELECT a.workspace_id, a.max_concurrent_tasks FROM agents a
+		`SELECT a.workspace_id FROM agents a
 		 JOIN workspaces w ON w.id = a.workspace_id
 		 WHERE w.slug = ? AND a.id = ?`, slug, id,
-	).Scan(&workspaceID, &maxConcurrent); err != nil {
+	).Scan(&workspaceID); err != nil {
 		writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
@@ -1031,115 +995,14 @@ func (h *Handler) ClaimAgentTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check current running count to enforce max_concurrent_tasks.
-	var runningCount int
-	if err := h.DB.QueryRow(
-		`SELECT COUNT(*) FROM agent_tasks WHERE agent_id = ? AND status IN ('dispatched', 'running')`,
-		id,
-	).Scan(&runningCount); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to count running tasks")
-		return
-	}
-
-	if runningCount >= maxConcurrent {
-		// Agent is at capacity — no task available.
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	// Atomic claim using BEGIN IMMEDIATE + subquery (SQLite has no FOR UPDATE SKIP LOCKED).
-	tx, err := h.DB.Begin()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
-		return
-	}
-	defer tx.Rollback()
-
-	// Force immediate lock to prevent concurrent claims.
-	if _, err := tx.Exec(`SELECT 1`); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to lock transaction")
-		return
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	// Update the highest-priority, oldest queued task.
-	result, err := tx.Exec(
-		`UPDATE agent_tasks
-		 SET status = 'dispatched', daemon_id = ?, dispatched_at = ?
-		 WHERE id = (
-		   SELECT id FROM agent_tasks
-		   WHERE agent_id = ? AND status = 'queued'
-		   ORDER BY priority DESC, created_at ASC
-		   LIMIT 1
-		 ) AND status = 'queued'`,
-		req.DaemonID, now, id,
-	)
+	t, err := service.NewTaskService(h.DB, h.EventBus).ClaimNextForAgent(r.Context(), workspaceID, id, req.DaemonID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to claim task")
 		return
 	}
-
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		// No queued task was available, or another claimer got it first.
+	if t == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
-	}
-
-	// Fetch the claimed task. Since we updated with a unique daemon_id,
-	// we can use it to retrieve the task we just claimed.
-	var t protocol.AgentTask
-	var runtimeID, dispatchedAt, startedAt, completedAt, parentTaskID sql.NullString
-	err = tx.QueryRow(
-		`SELECT id, agent_id, runtime_id, workspace_id, source_path, schema_id,
-		        status, priority, parent_task_id, session_id, work_dir,
-		        failure_reason, daemon_id, dispatched_at, started_at, completed_at,
-		        result, error, attempt, max_attempts, created_at
-		 FROM agent_tasks WHERE daemon_id = ? AND status = 'dispatched' AND agent_id = ?
-		 ORDER BY dispatched_at DESC LIMIT 1`,
-		req.DaemonID, id,
-	).Scan(
-		&t.ID, &t.AgentID, &runtimeID, &t.WorkspaceID, &t.SourcePath, &t.SchemaID,
-		&t.Status, &t.Priority, &parentTaskID, &t.SessionID, &t.WorkDir,
-		&t.FailureReason, &t.DaemonID, &dispatchedAt, &startedAt, &completedAt,
-		&t.Result, &t.Error, &t.Attempt, &t.MaxAttempts, &t.CreatedAt,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to fetch claimed task")
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to commit claim")
-		return
-	}
-
-	if runtimeID.Valid {
-		t.RuntimeID = &runtimeID.String
-	}
-	if dispatchedAt.Valid {
-		t.DispatchedAt = &dispatchedAt.String
-	}
-	if startedAt.Valid {
-		t.StartedAt = &startedAt.String
-	}
-	if completedAt.Valid {
-		t.CompletedAt = &completedAt.String
-	}
-	if parentTaskID.Valid {
-		t.ParentTaskID = &parentTaskID.String
-	}
-
-	// Publish event.
-	if h.EventBus != nil {
-		h.EventBus.Publish(events.Event{
-			Type:        events.EventTaskDispatched,
-			WorkspaceID: workspaceID,
-			AgentID:     id,
-			TaskID:      t.ID,
-			Payload:     t,
-		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"task": t})

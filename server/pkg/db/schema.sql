@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS agent_skills_agents (
 
 CREATE TABLE IF NOT EXISTS agent_tasks (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    job_id TEXT NOT NULL DEFAULT '',
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     runtime_id TEXT REFERENCES agent_runtimes(id),
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -186,6 +187,7 @@ CREATE INDEX IF NOT EXISTS idx_agents_runtime ON agents(runtime_id);
 CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_id);
 CREATE INDEX IF NOT EXISTS idx_agent_skills_workspace ON agent_skills(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_agent ON agent_tasks(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_job ON agent_tasks(job_id);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_workspace ON agent_tasks(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_agent_task_messages_task ON agent_task_messages(task_id);

@@ -18,6 +18,21 @@ func newTestJobService(t *testing.T) *JobService {
 
 	if _, err := db.Exec(`
 		CREATE TABLE workspaces (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+		CREATE TABLE agent_runtimes (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE TABLE agents (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			runtime_id TEXT REFERENCES agent_runtimes(id),
+			name TEXT NOT NULL,
+			max_concurrent_tasks INTEGER NOT NULL DEFAULT 6,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
 		CREATE TABLE jobs (
 			id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
 			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -32,7 +47,33 @@ func newTestJobService(t *testing.T) *JobService {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			completed_at TEXT
 		);
+		CREATE TABLE agent_tasks (
+			id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+			job_id TEXT NOT NULL DEFAULT '',
+			agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+			runtime_id TEXT REFERENCES agent_runtimes(id),
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			source_path TEXT NOT NULL DEFAULT '',
+			schema_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			priority INTEGER NOT NULL DEFAULT 0,
+			parent_task_id TEXT,
+			session_id TEXT NOT NULL DEFAULT '',
+			work_dir TEXT NOT NULL DEFAULT '',
+			failure_reason TEXT NOT NULL DEFAULT '',
+			daemon_id TEXT NOT NULL DEFAULT '',
+			dispatched_at TEXT,
+			started_at TEXT,
+			completed_at TEXT,
+			result TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			attempt INTEGER NOT NULL DEFAULT 1,
+			max_attempts INTEGER NOT NULL DEFAULT 3,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
 		INSERT INTO workspaces (id, slug, name) VALUES ('ws1', 'test', 'Test Workspace');
+		INSERT INTO agent_runtimes (id, workspace_id, name) VALUES ('rt1', 'ws1', 'Runtime');
+		INSERT INTO agents (id, workspace_id, runtime_id, name) VALUES ('agent1', 'ws1', 'rt1', 'Agent');
 	`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -67,6 +108,17 @@ func TestCreateJob(t *testing.T) {
 	}
 	if job.AgentID != "agent1" {
 		t.Errorf("expected agent_id 'agent1', got '%s'", job.AgentID)
+	}
+
+	var taskJobID, taskStatus, taskAgentID, taskRuntimeID string
+	if err := s.DB.QueryRow(
+		`SELECT job_id, status, agent_id, COALESCE(runtime_id, '') FROM agent_tasks WHERE job_id = ?`,
+		job.ID,
+	).Scan(&taskJobID, &taskStatus, &taskAgentID, &taskRuntimeID); err != nil {
+		t.Fatalf("expected agent task for job: %v", err)
+	}
+	if taskJobID != job.ID || taskStatus != "queued" || taskAgentID != "agent1" || taskRuntimeID != "rt1" {
+		t.Fatalf("unexpected task row: job=%q status=%q agent=%q runtime=%q", taskJobID, taskStatus, taskAgentID, taskRuntimeID)
 	}
 }
 
@@ -212,8 +264,10 @@ func TestUpdateJobProgress(t *testing.T) {
 func TestListAndGetJobsAreWorkspaceScoped(t *testing.T) {
 	s := newTestJobService(t)
 	s.DB.Exec(`INSERT INTO workspaces (id, slug, name) VALUES ('ws2', 'other', 'Other')`)
+	s.DB.Exec(`INSERT INTO agent_runtimes (id, workspace_id, name) VALUES ('rt2', 'ws2', 'Runtime 2')`)
+	s.DB.Exec(`INSERT INTO agents (id, workspace_id, runtime_id, name) VALUES ('agent2', 'ws2', 'rt2', 'Agent 2')`)
 	ws1Job, _ := s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
-	s.CreateJob(CreateJobInput{WorkspaceID: "ws2", AgentID: "agent1", SourcePath: "src2", SchemaID: "sch1"})
+	s.CreateJob(CreateJobInput{WorkspaceID: "ws2", AgentID: "agent2", SourcePath: "src2", SchemaID: "sch1"})
 
 	jobs, err := s.ListJobs("ws1")
 	if err != nil {

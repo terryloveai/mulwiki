@@ -265,6 +265,7 @@ type AddAgentSkillRequest struct {
 
 type AgentTask struct {
 	ID            string             `json:"id"`
+	JobID         string             `json:"job_id"`
 	AgentID       string             `json:"agent_id"`
 	RuntimeID     *string            `json:"runtime_id,omitempty"`
 	WorkspaceID   string             `json:"workspace_id"`

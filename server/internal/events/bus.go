@@ -18,6 +18,7 @@ const (
 	EventTaskStarted    EventType = "task.started"
 	EventTaskCompleted  EventType = "task.completed"
 	EventTaskFailed     EventType = "task.failed"
+	EventTaskCancelled  EventType = "task.cancelled"
 	EventDaemonOnline   EventType = "daemon.online"
 	EventDaemonOffline  EventType = "daemon.offline"
 )

@@ -865,6 +865,7 @@ func (d *Daemon) createTask(job protocol.Job, agent *protocol.Agent, runtime *pr
 	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s/tasks", d.ServerURL, d.WorkspaceSlug, agent.ID)
 
 	body := map[string]interface{}{
+		"job_id":       job.ID,
 		"source_path":  job.SourcePath,
 		"schema_id":    job.SchemaID,
 		"runtime_id":   runtime.ID,

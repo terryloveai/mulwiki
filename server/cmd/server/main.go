@@ -375,6 +375,12 @@ func runMigrations(db *sql.DB) error {
 	if err := ensureColumn(db, "agent_runtimes", "version", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := ensureColumn(db, "agent_tasks", "job_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_agent_tasks_job ON agent_tasks(job_id)`); err != nil {
+		return fmt.Errorf("create agent_tasks job index: %w", err)
+	}
 
 	slog.Info("migrations applied successfully")
 

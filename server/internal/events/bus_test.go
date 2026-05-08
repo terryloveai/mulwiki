@@ -162,6 +162,7 @@ func TestAllEventTypes(t *testing.T) {
 		EventTaskStarted,
 		EventTaskCompleted,
 		EventTaskFailed,
+		EventTaskCancelled,
 		EventDaemonOnline,
 		EventDaemonOffline,
 	}

@@ -458,7 +458,7 @@ func TestUpdateAgentTask(t *testing.T) {
 	h := newTestHandler(t)
 	h.DB.Exec(`INSERT INTO agents (id, workspace_id, name) VALUES ('a1', 'ws1', 'Agent')`)
 	h.DB.Exec(`INSERT INTO agent_runtimes (id, workspace_id, name) VALUES ('rt1', 'ws1', 'Claude')`)
-	h.DB.Exec(`INSERT INTO agent_tasks (id, agent_id, workspace_id, status) VALUES ('t1', 'a1', 'ws1', 'dispatched')`)
+	h.DB.Exec(`INSERT INTO agent_tasks (id, agent_id, workspace_id, status) VALUES ('t1', 'a1', 'ws1', 'running')`)
 
 	body := `{"status":"completed","result":"pages_created=5 pages_skipped=0"}`
 	req := chiRequest(http.MethodPatch, "/api/workspaces/test-workspace/agents/a1/tasks/t1", map[string]string{"slug": "test-workspace", "id": "a1", "taskId": "t1"}, strings.NewReader(body))
