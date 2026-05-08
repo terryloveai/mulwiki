@@ -162,6 +162,16 @@ CREATE TABLE IF NOT EXISTS daemon_registrations (
     registered_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS daemon_tokens (
+    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    daemon_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    revoked_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_schemas_workspace ON schemas(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_workspaces_active_schema ON workspaces(active_schema_id);
 CREATE INDEX IF NOT EXISTS idx_schemas_derived_from ON schemas(derived_from);
@@ -180,3 +190,5 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_workspace ON agent_tasks(workspace_id
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_agent_task_messages_task ON agent_task_messages(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_task_messages_workspace ON agent_task_messages(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_daemon_tokens_workspace ON daemon_tokens(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_daemon_tokens_daemon ON daemon_tokens(daemon_id);

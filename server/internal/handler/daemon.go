@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tethy/mulwiki/server/internal/events"
+	"github.com/tethy/mulwiki/server/internal/middleware"
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
@@ -26,6 +27,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 
 	if req.ID == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && req.ID != ctxDaemonID {
+		writeError(w, http.StatusForbidden, "daemon id mismatch")
 		return
 	}
 
@@ -57,6 +62,13 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	var workspaceID string
 	if req.WorkspaceSlug != "" {
 		h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, req.WorkspaceSlug).Scan(&workspaceID)
+	}
+	if workspaceID == "" {
+		workspaceID = middleware.GetWorkspaceID(r)
+	}
+	if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" && workspaceID != "" && workspaceID != tokenWorkspaceID {
+		writeError(w, http.StatusForbidden, "workspace access denied")
+		return
 	}
 
 	// Upsert auto-detected runtimes.
@@ -111,6 +123,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		query := `UPDATE agent_runtimes SET daemon_id = ?, last_heartbeat = ?, status = 'online'
 		          WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+		if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+			query += ` AND workspace_id = ?`
+			args = append(args, tokenWorkspaceID)
+		}
 		if _, err := h.DB.Exec(query, args...); err != nil {
 			slog.Error("daemon register: failed to update runtimes", "error", err)
 		}
@@ -167,6 +183,10 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
+	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && req.ID != ctxDaemonID {
+		writeError(w, http.StatusForbidden, "daemon id mismatch")
+		return
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -204,6 +224,10 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 		query := `UPDATE agent_runtimes SET last_heartbeat = ?, status = 'online'
 		          WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+		if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+			query += ` AND workspace_id = ?`
+			args = append(args, tokenWorkspaceID)
+		}
 		if _, err := h.DB.Exec(query, args...); err != nil {
 			slog.Error("daemon heartbeat: failed to update runtimes", "error", err)
 		}
@@ -225,12 +249,15 @@ func (h *Handler) DaemonStale(w http.ResponseWriter, r *http.Request) {
 	cutoff := time.Now().UTC().Add(-staleAfter).Format(time.RFC3339)
 
 	// Mark runtimes as offline where last_heartbeat is stale or never set.
-	result, err := h.DB.Exec(
-		`UPDATE agent_runtimes SET status = 'offline'
-		 WHERE (last_heartbeat < ? OR last_heartbeat = '')
-		   AND status = 'online'`,
-		cutoff,
-	)
+	query := `UPDATE agent_runtimes SET status = 'offline'
+		WHERE (last_heartbeat < ? OR last_heartbeat = '')
+		  AND status = 'online'`
+	args := []any{cutoff}
+	if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+		query += ` AND workspace_id = ?`
+		args = append(args, tokenWorkspaceID)
+	}
+	result, err := h.DB.Exec(query, args...)
 	if err != nil {
 		slog.Error("daemon stale check failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "stale check failed")
@@ -291,6 +318,10 @@ func (h *Handler) ListDaemons(w http.ResponseWriter, r *http.Request) {
 // GET /api/daemon/{id}/logs — tail daemon log
 func (h *Handler) GetDaemonLogs(w http.ResponseWriter, r *http.Request) {
 	id := idParam(r, "id")
+	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && id != ctxDaemonID {
+		writeError(w, http.StatusForbidden, "daemon id mismatch")
+		return
+	}
 	n := 50
 	if nStr := r.URL.Query().Get("n"); nStr != "" {
 		if parsed, err := strconv.Atoi(nStr); err == nil && parsed > 0 && parsed <= 500 {
@@ -322,6 +353,10 @@ func (h *Handler) GetDaemonLogs(w http.ResponseWriter, r *http.Request) {
 // POST /api/daemon/{id}/stop — stop daemon by PID
 func (h *Handler) StopDaemon(w http.ResponseWriter, r *http.Request) {
 	id := idParam(r, "id")
+	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && id != ctxDaemonID {
+		writeError(w, http.StatusForbidden, "daemon id mismatch")
+		return
+	}
 
 	var pid int
 	err := h.DB.QueryRow(`SELECT pid FROM daemon_registrations WHERE id = ?`, id).Scan(&pid)
@@ -342,7 +377,11 @@ func (h *Handler) StopDaemon(w http.ResponseWriter, r *http.Request) {
 		if err := proc.Kill(); err != nil {
 			// Process already dead — still clear heartbeat
 			h.DB.Exec(`UPDATE daemon_registrations SET pid = 0, last_heartbeat = '1970-01-01T00:00:00Z' WHERE id = ?`, id)
-			h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ?`, id)
+			if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+				h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ? AND workspace_id = ?`, id, tokenWorkspaceID)
+			} else {
+				h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ?`, id)
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"daemon_id": id, "status": "already_stopped"})
 			return
 		}
@@ -352,7 +391,11 @@ func (h *Handler) StopDaemon(w http.ResponseWriter, r *http.Request) {
 	h.DB.Exec(`UPDATE daemon_registrations SET pid = 0, last_heartbeat = '1970-01-01T00:00:00Z' WHERE id = ?`, id)
 
 	// Mark runtimes as offline too
-	h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ?`, id)
+	if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+		h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ? AND workspace_id = ?`, id, tokenWorkspaceID)
+	} else {
+		h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ?`, id)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"daemon_id": id, "status": "stopped"})
 }
@@ -396,6 +439,9 @@ func (h *Handler) StartDaemon(w http.ResponseWriter, r *http.Request) {
 		"--workspace", req.Workspace,
 		"--server-url", req.ServerURL,
 	)
+	if token := middleware.DaemonTokenFromContext(r.Context()); token != "" {
+		cmd.Args = append(cmd.Args, "--daemon-token", token)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

@@ -59,6 +59,7 @@ func init() {
 	f.String("server-url", "", "Mulwiki server URL (env: MULWIKI_SERVER_URL)")
 	f.String("workspace", "", "Workspace slug to watch (env: MULWIKI_WORKSPACE)")
 	f.String("repos-path", "", "Path to bare git repos (env: MULWIKI_REPOS_PATH)")
+	f.String("daemon-token", "", "Daemon token (env: MULWIKI_DAEMON_TOKEN, file: ~/.mulwiki/daemon/token)")
 
 	daemonLogsCmd.Flags().BoolP("follow", "f", false, "Follow log output")
 	daemonLogsCmd.Flags().IntP("lines", "n", 50, "Number of lines to show")
@@ -94,6 +95,14 @@ func daemonPIDPath() string {
 
 func daemonLogPath() string {
 	return filepath.Join(daemonDir(), "daemon.log")
+}
+
+func daemonIDPath() string {
+	return filepath.Join(daemonDir(), "daemon.id")
+}
+
+func daemonTokenPath() string {
+	return filepath.Join(daemonDir(), "token")
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +143,9 @@ func runDaemonBackground(cmd *cobra.Command) error {
 	}
 	if v, _ := cmd.Flags().GetString("repos-path"); v != "" {
 		args = append(args, "--repos-path", v)
+	}
+	if v, _ := cmd.Flags().GetString("daemon-token"); v != "" {
+		args = append(args, "--daemon-token", v)
 	}
 
 	// Ensure daemon directory exists.
@@ -211,9 +223,25 @@ func runDaemonForeground(cmd *cobra.Command) error {
 		// Default: repos live alongside the server
 		reposPath = filepath.Join(os.Getenv("HOME"), "Documents/DevCode/github/mulwiki/server/data/repos")
 	}
+
+	daemonID, err := daemon.LoadOrCreateDaemonID(daemonIDPath())
+	if err != nil {
+		return fmt.Errorf("load daemon id: %w", err)
+	}
+	tokenFlag, _ := cmd.Flags().GetString("daemon-token")
+	daemonToken, err := resolveDaemonToken(tokenFlag, daemonTokenPath())
+	if err != nil {
+		return fmt.Errorf("resolve daemon token: %w", err)
+	}
+	if daemonToken == "" {
+		return fmt.Errorf("daemon token is required: pass --daemon-token, set MULWIKI_DAEMON_TOKEN, or write %s", daemonTokenPath())
+	}
+
 	cfg := daemon.Config{
 		ServerURL:     serverURL,
 		WorkspaceSlug: workspaceSlug,
+		DaemonID:      daemonID,
+		DaemonToken:   daemonToken,
 		WorkDir:       filepath.Join(os.TempDir(), "mulwiki-daemon"),
 		ReposURL:      reposPath,
 		HealthPort:    daemonHealthPort,
@@ -229,6 +257,23 @@ func runDaemonForeground(cmd *cobra.Command) error {
 
 	d := daemon.New(cfg)
 	return d.RunContext(ctx)
+}
+
+func resolveDaemonToken(flagValue, tokenPath string) (string, error) {
+	if token := strings.TrimSpace(flagValue); token != "" {
+		return token, nil
+	}
+	if token := strings.TrimSpace(os.Getenv("MULWIKI_DAEMON_TOKEN")); token != "" {
+		return token, nil
+	}
+	data, err := os.ReadFile(tokenPath)
+	if err == nil {
+		return strings.TrimSpace(string(data)), nil
+	}
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return "", err
 }
 
 // signalContext returns a context that cancels on SIGINT or SIGTERM.

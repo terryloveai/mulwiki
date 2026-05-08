@@ -144,32 +144,30 @@ func main() {
 
 	// --- Daemon routes ---
 	r.Route("/api/daemon", func(r chi.Router) {
+		r.Use(middleware.DaemonAuth(db))
 		r.Get("/", h.ListDaemons)
-		r.With(middleware.DaemonIdentity).Post("/register", h.DaemonRegister)
-		r.With(middleware.DaemonIdentity).Post("/heartbeat", h.DaemonHeartbeat)
+		r.Post("/register", h.DaemonRegister)
+		r.Post("/heartbeat", h.DaemonHeartbeat)
 		r.Get("/stale", h.DaemonStale)
 		r.Get("/{id}/logs", h.GetDaemonLogs)
 		r.Post("/{id}/stop", h.StopDaemon)
 		r.Post("/start", h.StartDaemon)
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.DaemonIdentity)
-			r.Route("/workspaces/{slug}", func(r chi.Router) {
-				r.Use(middleware.Workspace(db))
-				r.Get("/", h.GetWorkspace)
-				r.Get("/schemas/{id}", h.GetSchema)
-				r.Get("/agents/runtimes/{id}", h.GetRuntime)
-				r.Get("/agents/{id}", h.GetAgent)
-				r.Post("/jobs/claim", h.ClaimJob)
-				r.Post("/jobs/{id}/log-line", h.AppendJobLog)
-				r.Post("/jobs/{id}/progress", h.UpdateJobProgress)
-				r.Post("/jobs/{id}/complete", h.CompleteJob)
-				r.Post("/jobs/{id}/fail", h.FailJob)
-				r.Post("/jobs/{id}/output", h.SubmitJobOutput)
-				r.Post("/agents/{id}/heartbeat", h.AgentHeartbeat)
-				r.Post("/agents/{id}/tasks/claim", h.ClaimAgentTask)
-				r.Post("/agents/{id}/tasks", h.CreateAgentTask)
-				r.Patch("/agents/{id}/tasks/{taskId}", h.UpdateAgentTask)
-			})
+		r.Route("/workspaces/{slug}", func(r chi.Router) {
+			r.Use(middleware.Workspace(db))
+			r.Get("/", h.GetWorkspace)
+			r.Get("/schemas/{id}", h.GetSchema)
+			r.Get("/agents/runtimes/{id}", h.GetRuntime)
+			r.Get("/agents/{id}", h.GetAgent)
+			r.Post("/jobs/claim", h.ClaimJob)
+			r.Post("/jobs/{id}/log-line", h.AppendJobLog)
+			r.Post("/jobs/{id}/progress", h.UpdateJobProgress)
+			r.Post("/jobs/{id}/complete", h.CompleteJob)
+			r.Post("/jobs/{id}/fail", h.FailJob)
+			r.Post("/jobs/{id}/output", h.SubmitJobOutput)
+			r.Post("/agents/{id}/heartbeat", h.AgentHeartbeat)
+			r.Post("/agents/{id}/tasks/claim", h.ClaimAgentTask)
+			r.Post("/agents/{id}/tasks", h.CreateAgentTask)
+			r.Patch("/agents/{id}/tasks/{taskId}", h.UpdateAgentTask)
 		})
 	})
 
@@ -221,6 +219,7 @@ func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
 			r.Get("/", h.GetWorkspace)
 			r.With(middleware.RequireAdmin()).Patch("/", h.UpdateWorkspace)
 			r.With(middleware.RequireOwner()).Delete("/", h.DeleteWorkspace)
+			r.With(middleware.RequireAdmin()).Post("/daemon-tokens", h.CreateDaemonToken)
 
 			// Schemas
 			r.Route("/schemas", func(r chi.Router) {

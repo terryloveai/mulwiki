@@ -3,8 +3,6 @@ package middleware
 import (
 	"context"
 	"net/http"
-	"os"
-	"strings"
 )
 
 const DaemonIDKey contextKey = "daemon_id"
@@ -59,40 +57,9 @@ func RequireAdmin() func(http.Handler) http.Handler {
 	return Role("owner", "admin")
 }
 
-// DaemonIdentity validates daemon-facing requests. It accepts either
-// X-Daemon-ID or a Bearer token matching DAEMON_TOKEN when that env var is set.
-func DaemonIdentity(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		daemonID := r.Header.Get("X-Daemon-ID")
-		if daemonID == "" && daemonToken(r) != "" {
-			daemonID = "token-auth"
-		}
-		if daemonID != "" {
-			ctx := context.WithValue(r.Context(), DaemonIDKey, daemonID)
-			next.ServeHTTP(w, r.WithContext(ctx))
-			return
-		}
-
-		writeError(w, http.StatusUnauthorized, "daemon identity required")
-	})
-}
-
 func GetDaemonID(r *http.Request) string {
 	if id, ok := r.Context().Value(DaemonIDKey).(string); ok {
 		return id
 	}
-	return r.Header.Get("X-Daemon-ID")
-}
-
-func daemonToken(r *http.Request) string {
-	expected := os.Getenv("DAEMON_TOKEN")
-	if expected == "" {
-		return ""
-	}
-	authHeader := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == authHeader || token != expected {
-		return ""
-	}
-	return token
+	return ""
 }

@@ -678,6 +678,10 @@ func (h *Handler) CreateAgentTask(w http.ResponseWriter, r *http.Request) {
 	if req.DaemonID == "" {
 		req.DaemonID = daemonID(r)
 	}
+	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && req.DaemonID != ctxDaemonID {
+		writeError(w, http.StatusForbidden, "daemon id mismatch")
+		return
+	}
 
 	if req.MaxAttempts <= 0 {
 		req.MaxAttempts = 3
@@ -786,6 +790,10 @@ func (h *Handler) UpdateAgentTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DaemonID == "" {
 		req.DaemonID = daemonID(r)
+	}
+	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && req.DaemonID != ctxDaemonID {
+		writeError(w, http.StatusForbidden, "daemon id mismatch")
+		return
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -1010,9 +1018,16 @@ func (h *Handler) ClaimAgentTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if req.DaemonID == "" {
+		req.DaemonID = daemonID(r)
+	}
 
 	if req.DaemonID == "" {
 		writeError(w, http.StatusBadRequest, "daemon_id is required")
+		return
+	}
+	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && req.DaemonID != ctxDaemonID {
+		writeError(w, http.StatusForbidden, "daemon id mismatch")
 		return
 	}
 

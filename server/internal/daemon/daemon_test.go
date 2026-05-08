@@ -41,6 +41,47 @@ func TestNewDaemon(t *testing.T) {
 	}
 }
 
+func TestLoadOrCreateDaemonIDPersistsStableID(t *testing.T) {
+	idPath := filepath.Join(t.TempDir(), "daemon.id")
+
+	first, err := LoadOrCreateDaemonID(idPath)
+	if err != nil {
+		t.Fatalf("load/create first id: %v", err)
+	}
+	if first == "" {
+		t.Fatal("expected first id")
+	}
+
+	second, err := LoadOrCreateDaemonID(idPath)
+	if err != nil {
+		t.Fatalf("load/create second id: %v", err)
+	}
+	if second != first {
+		t.Fatalf("expected stable daemon id %q, got %q", first, second)
+	}
+}
+
+func TestNewDaemonRequestUsesConfiguredDaemonToken(t *testing.T) {
+	d := New(Config{
+		ServerURL:     "http://localhost:8080",
+		WorkspaceSlug: "test",
+		DaemonID:      "daemon-1",
+		DaemonToken:   "mwd_test-token",
+	})
+
+	req, err := d.newDaemonRequest(http.MethodPost, "http://localhost:8080/api/daemon/register", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	if got := req.Header.Get("Authorization"); got != "Bearer mwd_test-token" {
+		t.Fatalf("expected configured bearer token, got %q", got)
+	}
+	if got := req.Header.Get("X-Daemon-ID"); got != "daemon-1" {
+		t.Fatalf("expected X-Daemon-ID daemon-1, got %q", got)
+	}
+}
+
 func TestClaimNextJob_NoPendingJobs(t *testing.T) {
 	srv, mux := setupMockServer(t)
 

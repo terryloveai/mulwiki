@@ -31,9 +31,16 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if req.DaemonID == "" {
+		req.DaemonID = daemonID(r)
+	}
 
 	if req.DaemonID == "" {
 		writeError(w, http.StatusBadRequest, "daemon_id is required")
+		return
+	}
+	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && req.DaemonID != ctxDaemonID {
+		writeError(w, http.StatusForbidden, "daemon id mismatch")
 		return
 	}
 
@@ -206,6 +213,11 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 // POST /api/workspaces/{slug}/jobs/{id}/log-line — daemon pushes a log line
 func (h *Handler) AppendJobLog(w http.ResponseWriter, r *http.Request) {
 	id := idParam(r, "id")
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
 
 	var body struct {
 		Stream string `json:"stream"`
@@ -213,6 +225,12 @@ func (h *Handler) AppendJobLog(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	var exists int
+	if err := h.DB.QueryRow(`SELECT COUNT(*) FROM jobs WHERE id = ? AND workspace_id = ?`, id, workspaceID).Scan(&exists); err != nil || exists == 0 {
+		writeError(w, http.StatusNotFound, "job not found")
 		return
 	}
 
@@ -331,6 +349,16 @@ type pageOutput struct {
 
 func (h *Handler) SubmitJobOutput(w http.ResponseWriter, r *http.Request) {
 	id := idParam(r, "id")
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	var exists int
+	if err := h.DB.QueryRow(`SELECT COUNT(*) FROM jobs WHERE id = ? AND workspace_id = ?`, id, workspaceID).Scan(&exists); err != nil || exists == 0 {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
 
 	repo, err := h.openRepo(r)
 	if err != nil {

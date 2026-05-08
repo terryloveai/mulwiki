@@ -44,6 +44,10 @@ func Workspace(db *sql.DB) func(http.Handler) http.Handler {
 				w.Write([]byte(`{"error":"workspace not found"}`))
 				return
 			}
+			if existingID := WorkspaceIDFromContext(r.Context()); existingID != "" && existingID != workspaceID {
+				writeError(w, http.StatusForbidden, "workspace access denied")
+				return
+			}
 
 			ctx := context.WithValue(r.Context(), WorkspaceIDKey, workspaceID)
 			ctx = context.WithValue(ctx, WorkspaceSlugKey, slug)

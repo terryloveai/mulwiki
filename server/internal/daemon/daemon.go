@@ -32,6 +32,7 @@ type Daemon struct {
 	ServerURL     string
 	WorkspaceSlug string
 	DaemonID      string
+	DaemonToken   string
 	WorkDir       string
 	HTTPClient    *http.Client
 	ReposURL      string // git repo URL for workspace (http://backend/repos/ws-id.git)
@@ -52,6 +53,8 @@ type Daemon struct {
 type Config struct {
 	ServerURL     string
 	WorkspaceSlug string
+	DaemonID      string
+	DaemonToken   string
 	WorkDir       string
 	ReposURL      string        // e.g. "http://localhost:8080/repos" or "/data/repos" for local
 	HealthPort    int           // port for health HTTP server (0 = disabled)
@@ -69,10 +72,15 @@ func New(cfg Config) *Daemon {
 	if cfg.AgentTimeout == 0 {
 		cfg.AgentTimeout = 30 * time.Minute
 	}
+	daemonID := cfg.DaemonID
+	if daemonID == "" {
+		daemonID = uuid.New().String()
+	}
 	return &Daemon{
 		ServerURL:     cfg.ServerURL,
 		WorkspaceSlug: cfg.WorkspaceSlug,
-		DaemonID:      uuid.New().String(),
+		DaemonID:      daemonID,
+		DaemonToken:   cfg.DaemonToken,
 		WorkDir:       cfg.WorkDir,
 		ReposURL:      cfg.ReposURL,
 		HealthPort:    cfg.HealthPort,
@@ -84,6 +92,26 @@ func New(cfg Config) *Daemon {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+func LoadOrCreateDaemonID(path string) (string, error) {
+	if data, err := os.ReadFile(path); err == nil {
+		id := strings.TrimSpace(string(data))
+		if id != "" {
+			return id, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	id := uuid.New().String()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(id+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func (d *Daemon) Run() error {
@@ -329,7 +357,9 @@ func (d *Daemon) newDaemonRequest(method, url string, body io.Reader) (*http.Req
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("X-Daemon-ID", d.DaemonID)
-	if token := os.Getenv("DAEMON_TOKEN"); token != "" {
+	if token := d.DaemonToken; token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else if token := os.Getenv("MULWIKI_DAEMON_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	return req, nil
