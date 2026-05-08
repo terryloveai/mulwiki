@@ -381,7 +381,7 @@ func (d *Daemon) heartbeatLoop(runtimes []protocol.RuntimeInfo) {
 
 // claimNextJob claims the next pending job from the server.
 func (d *Daemon) claimNextJob() (*protocol.Job, error) {
-	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/claim", d.ServerURL, d.WorkspaceSlug)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/claim", d.ServerURL, d.WorkspaceSlug)
 
 	body := map[string]string{"daemon_id": d.DaemonID}
 	jsonBody, err := json.Marshal(body)
@@ -1246,7 +1246,7 @@ func (d *Daemon) collectOutput(workdir string, job protocol.Job, _ *protocol.Age
 	}{job.ID, pages}
 
 	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/%s/output", d.ServerURL, d.WorkspaceSlug, job.ID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/output", d.ServerURL, d.WorkspaceSlug, job.ID)
 	resp, err := d.postJSON(url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("deliver output: %w", err)
@@ -1328,7 +1328,7 @@ func (d *Daemon) streamLogs(reader io.Reader, jobID, stream string) {
 
 // postLogLine sends a single log line to the server's log buffer for SSE streaming.
 func (d *Daemon) postLogLine(jobID, stream, line string) {
-	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/%s/log-line", d.ServerURL, d.WorkspaceSlug, jobID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/log-line", d.ServerURL, d.WorkspaceSlug, jobID)
 	body := map[string]string{
 		"stream": stream,
 		"line":   line,
@@ -1348,7 +1348,7 @@ func (d *Daemon) postLogLine(jobID, stream, line string) {
 
 // updateProgress sends a progress update to the server.
 func (d *Daemon) updateProgress(jobID string, progress int) {
-	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/%s/progress", d.ServerURL, d.WorkspaceSlug, jobID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/progress", d.ServerURL, d.WorkspaceSlug, jobID)
 	body := map[string]int{"progress": progress}
 	jsonBody, _ := json.Marshal(body)
 	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
@@ -1361,7 +1361,7 @@ func (d *Daemon) updateProgress(jobID string, progress int) {
 
 // completeJob marks the job as completed on the server.
 func (d *Daemon) completeJob(jobID string) {
-	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/%s/complete", d.ServerURL, d.WorkspaceSlug, jobID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/complete", d.ServerURL, d.WorkspaceSlug, jobID)
 	resp, err := d.postJSON(url, nil)
 	if err != nil {
 		slog.Error("complete job failed", "job_id", jobID, "error", err)
@@ -1373,7 +1373,7 @@ func (d *Daemon) completeJob(jobID string) {
 
 // failJob marks the job as failed on the server.
 func (d *Daemon) failJob(jobID, errMsg string) {
-	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/%s/fail", d.ServerURL, d.WorkspaceSlug, jobID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/fail", d.ServerURL, d.WorkspaceSlug, jobID)
 	body := map[string]string{"error": errMsg}
 	jsonBody, _ := json.Marshal(body)
 	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))

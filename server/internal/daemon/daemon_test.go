@@ -44,7 +44,7 @@ func TestNewDaemon(t *testing.T) {
 func TestClaimNextJob_NoPendingJobs(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
@@ -65,7 +65,7 @@ func TestClaimNextJob_NoPendingJobs(t *testing.T) {
 func TestClaimNextJob_Success(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		job := map[string]interface{}{
 			"id":           "job-1",
 			"workspace_id": "ws1",
@@ -480,8 +480,8 @@ func TestE2EJobPipeline(t *testing.T) {
 		})
 	})
 
-	// Mock: job claim (POST /api/workspaces/test/jobs/claim)
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	// Mock: job claim (POST /api/daemon/workspaces/test/jobs/claim)
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST /jobs/claim, got %s", r.Method)
 		}
@@ -572,12 +572,12 @@ func TestE2EJobPipeline(t *testing.T) {
 	})
 
 	// Mock: update progress
-	mux.HandleFunc("/api/workspaces/test/jobs/job-e2e-1/progress", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/job-e2e-1/progress", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
 	// Mock: complete job
-	mux.HandleFunc("/api/workspaces/test/jobs/job-e2e-1/complete", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/job-e2e-1/complete", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST /complete, got %s", r.Method)
 		}
@@ -712,7 +712,7 @@ func TestE2EJobFailure(t *testing.T) {
 	})
 
 	// Mock: job claim returns an agent-bound job that will fail
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(protocol.Job{
 			ID:          "job-fail-1",
 			WorkspaceID: "ws1",
@@ -738,7 +738,7 @@ func TestE2EJobFailure(t *testing.T) {
 	})
 
 	// Mock: fail job
-	mux.HandleFunc("/api/workspaces/test/jobs/job-fail-1/fail", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/job-fail-1/fail", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 		if body["error"] == "" {
@@ -779,7 +779,7 @@ func TestE2EJobFailure(t *testing.T) {
 func TestDaemonJobClaim_NoContent(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -798,7 +798,7 @@ func TestDaemonJobClaim_NoContent(t *testing.T) {
 func TestDaemonJobClaim_Error(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 

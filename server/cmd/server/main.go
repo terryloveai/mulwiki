@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -139,133 +140,7 @@ func main() {
 	r.Get("/api/schemas/builtin", h.ListBuiltinSchemas)
 
 	// --- Workspace routes ---
-	r.Route("/api/workspaces", func(r chi.Router) {
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.Auth(db))
-			r.Get("/", h.ListWorkspaces)
-			r.Post("/", h.CreateWorkspace)
-			r.Route("/{slug}", func(r chi.Router) {
-				r.Use(middleware.Workspace(db))
-				r.Use(middleware.RequireWorkspaceMember(db))
-				r.Use(middleware.RequireMember())
-
-				r.Get("/", h.GetWorkspace)
-				r.With(middleware.RequireAdmin()).Patch("/", h.UpdateWorkspace)
-				r.With(middleware.RequireOwner()).Delete("/", h.DeleteWorkspace)
-
-				// Schemas
-				r.Route("/schemas", func(r chi.Router) {
-					r.Get("/", h.ListSchemas)
-					r.With(middleware.RequireAdmin()).Post("/", h.CreateSchema)
-					r.With(middleware.RequireAdmin()).Post("/fork", h.ForkSchema)
-					r.Post("/validate", h.ValidateSchema)
-					r.Get("/{id}", h.GetSchema)
-					r.With(middleware.RequireAdmin()).Put("/{id}", h.UpdateSchema)
-					r.With(middleware.RequireAdmin()).Delete("/{id}", h.DeleteSchema)
-				})
-
-				// Workspace-level actions
-				r.With(middleware.RequireAdmin()).Put("/activate-schema", h.ActivateSchema)
-
-				// Sources (git-backed — wildcard path)
-				r.Route("/sources", func(r chi.Router) {
-					r.Get("/", h.ListSources)
-					r.Post("/", h.CreateSource)
-					r.Get("/*", h.GetSource)
-					r.Delete("/*", h.DeleteSource)
-				})
-
-				// Wikilink resolution & backlinks (explicit paths, avoid /* wildcard)
-				r.Post("/wiki/resolve-links", h.ResolveWikiLinks)
-				r.Get("/wiki/backlinks", h.GetWikiBacklinks) // ?path=...
-
-				// Wiki (git-backed — markdown with frontmatter)
-				r.Route("/wiki", func(r chi.Router) {
-					r.Get("/", h.ListWikiPages)
-					r.Get("/search", h.SearchWikiPages)
-					r.Post("/", h.CreateWikiPage)
-					r.Get("/*", h.GetWikiPage)
-					r.Delete("/*", h.DeleteWikiPage)
-				})
-
-				// Jobs (user-facing)
-				r.Route("/jobs", func(r chi.Router) {
-					r.Get("/", h.ListJobs)
-					r.Post("/", h.CreateJob)
-					r.Get("/{id}", h.GetJob)
-					r.Get("/{id}/logs", h.StreamJobLogs)
-				})
-
-				// Agents
-				r.Route("/agents", func(r chi.Router) {
-					// Runtimes — must register before /{id} catch-all
-					r.Route("/runtimes", func(r chi.Router) {
-						r.Get("/", h.ListRuntimes)
-						r.Post("/", h.CreateRuntime)
-						r.Get("/{id}", h.GetRuntime)
-						r.Patch("/{id}", h.UpdateRuntime)
-						r.Delete("/{id}", h.DeleteRuntime)
-					})
-
-					// Skills — must register before /{id} catch-all
-					r.Route("/skills", func(r chi.Router) {
-						r.Get("/", h.ListSkills)
-						r.Post("/", h.CreateSkill)
-						r.Patch("/{id}", h.UpdateSkill)
-						r.Delete("/{id}", h.DeleteSkill)
-					})
-
-					// Agent list + create
-					r.Get("/", h.ListAgents)
-					r.Post("/", h.CreateAgent)
-
-					// Agent by ID — must come after /runtimes and /skills
-					r.Route("/{id}", func(r chi.Router) {
-						r.Get("/", h.GetAgent)
-						r.Patch("/", h.UpdateAgent)
-						r.Post("/archive", h.ArchiveAgent)
-						r.Post("/restore", h.RestoreAgent)
-
-						// Agent-skill associations
-						r.Route("/skills", func(r chi.Router) {
-							r.Post("/", h.AddAgentSkill)
-							r.Delete("/{skillId}", h.RemoveAgentSkill)
-						})
-
-						// Agent tasks
-						r.Route("/tasks", func(r chi.Router) {
-							r.Get("/", h.ListAgentTasks)
-							r.Post("/", h.CreateAgentTask)
-							r.Get("/{taskId}", h.GetAgentTask)
-							r.Patch("/{taskId}", h.UpdateAgentTask)
-						})
-					})
-				})
-			})
-		})
-
-		// Daemon-facing workspace routes use daemon identity, not user membership.
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.DaemonIdentity)
-			r.Route("/{slug}", func(r chi.Router) {
-				r.Use(middleware.Workspace(db))
-
-				r.Route("/jobs", func(r chi.Router) {
-					r.Post("/claim", h.ClaimJob)
-					r.Post("/{id}/log-line", h.AppendJobLog)
-					r.Post("/{id}/progress", h.UpdateJobProgress)
-					r.Post("/{id}/complete", h.CompleteJob)
-					r.Post("/{id}/fail", h.FailJob)
-					r.Post("/{id}/output", h.SubmitJobOutput)
-				})
-
-				r.Route("/agents/{id}", func(r chi.Router) {
-					r.Post("/heartbeat", h.AgentHeartbeat)
-					r.Post("/tasks/claim", h.ClaimAgentTask)
-				})
-			})
-		})
-	})
+	mountWorkspaceRoutes(r, db, h)
 
 	// --- Daemon routes ---
 	r.Route("/api/daemon", func(r chi.Router) {
@@ -284,6 +159,14 @@ func main() {
 				r.Get("/schemas/{id}", h.GetSchema)
 				r.Get("/agents/runtimes/{id}", h.GetRuntime)
 				r.Get("/agents/{id}", h.GetAgent)
+				r.Post("/jobs/claim", h.ClaimJob)
+				r.Post("/jobs/{id}/log-line", h.AppendJobLog)
+				r.Post("/jobs/{id}/progress", h.UpdateJobProgress)
+				r.Post("/jobs/{id}/complete", h.CompleteJob)
+				r.Post("/jobs/{id}/fail", h.FailJob)
+				r.Post("/jobs/{id}/output", h.SubmitJobOutput)
+				r.Post("/agents/{id}/heartbeat", h.AgentHeartbeat)
+				r.Post("/agents/{id}/tasks/claim", h.ClaimAgentTask)
 				r.Post("/agents/{id}/tasks", h.CreateAgentTask)
 				r.Patch("/agents/{id}/tasks/{taskId}", h.UpdateAgentTask)
 			})
@@ -325,6 +208,112 @@ func main() {
 	slog.Info("server stopped")
 }
 
+func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
+	r.Route("/api/workspaces", func(r chi.Router) {
+		r.Use(middleware.Auth(db))
+		r.Get("/", h.ListWorkspaces)
+		r.Post("/", h.CreateWorkspace)
+		r.Route("/{slug}", func(r chi.Router) {
+			r.Use(middleware.Workspace(db))
+			r.Use(middleware.RequireWorkspaceMember(db))
+			r.Use(middleware.RequireMember())
+
+			r.Get("/", h.GetWorkspace)
+			r.With(middleware.RequireAdmin()).Patch("/", h.UpdateWorkspace)
+			r.With(middleware.RequireOwner()).Delete("/", h.DeleteWorkspace)
+
+			// Schemas
+			r.Route("/schemas", func(r chi.Router) {
+				r.Get("/", h.ListSchemas)
+				r.With(middleware.RequireAdmin()).Post("/", h.CreateSchema)
+				r.With(middleware.RequireAdmin()).Post("/fork", h.ForkSchema)
+				r.Post("/validate", h.ValidateSchema)
+				r.Get("/{id}", h.GetSchema)
+				r.With(middleware.RequireAdmin()).Put("/{id}", h.UpdateSchema)
+				r.With(middleware.RequireAdmin()).Delete("/{id}", h.DeleteSchema)
+			})
+
+			// Workspace-level actions
+			r.With(middleware.RequireAdmin()).Put("/activate-schema", h.ActivateSchema)
+
+			// Sources (git-backed — wildcard path)
+			r.Route("/sources", func(r chi.Router) {
+				r.Get("/", h.ListSources)
+				r.Post("/", h.CreateSource)
+				r.Get("/*", h.GetSource)
+				r.Delete("/*", h.DeleteSource)
+			})
+
+			// Wikilink resolution & backlinks (explicit paths, avoid /* wildcard)
+			r.Post("/wiki/resolve-links", h.ResolveWikiLinks)
+			r.Get("/wiki/backlinks", h.GetWikiBacklinks) // ?path=...
+
+			// Wiki (git-backed — markdown with frontmatter)
+			r.Route("/wiki", func(r chi.Router) {
+				r.Get("/", h.ListWikiPages)
+				r.Get("/search", h.SearchWikiPages)
+				r.Post("/", h.CreateWikiPage)
+				r.Get("/*", h.GetWikiPage)
+				r.Delete("/*", h.DeleteWikiPage)
+			})
+
+			// Jobs (user-facing)
+			r.Route("/jobs", func(r chi.Router) {
+				r.Get("/", h.ListJobs)
+				r.Post("/", h.CreateJob)
+				r.Get("/{id}", h.GetJob)
+				r.Get("/{id}/logs", h.StreamJobLogs)
+			})
+
+			// Agents
+			r.Route("/agents", func(r chi.Router) {
+				// Runtimes - must register before /{id} catch-all
+				r.Route("/runtimes", func(r chi.Router) {
+					r.Get("/", h.ListRuntimes)
+					r.Post("/", h.CreateRuntime)
+					r.Get("/{id}", h.GetRuntime)
+					r.Patch("/{id}", h.UpdateRuntime)
+					r.Delete("/{id}", h.DeleteRuntime)
+				})
+
+				// Skills - must register before /{id} catch-all
+				r.Route("/skills", func(r chi.Router) {
+					r.Get("/", h.ListSkills)
+					r.Post("/", h.CreateSkill)
+					r.Patch("/{id}", h.UpdateSkill)
+					r.Delete("/{id}", h.DeleteSkill)
+				})
+
+				// Agent list + create
+				r.Get("/", h.ListAgents)
+				r.Post("/", h.CreateAgent)
+
+				// Agent by ID - must come after /runtimes and /skills
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.GetAgent)
+					r.Patch("/", h.UpdateAgent)
+					r.Post("/archive", h.ArchiveAgent)
+					r.Post("/restore", h.RestoreAgent)
+
+					// Agent-skill associations
+					r.Route("/skills", func(r chi.Router) {
+						r.Post("/", h.AddAgentSkill)
+						r.Delete("/{skillId}", h.RemoveAgentSkill)
+					})
+
+					// Agent tasks
+					r.Route("/tasks", func(r chi.Router) {
+						r.Get("/", h.ListAgentTasks)
+						r.Post("/", h.CreateAgentTask)
+						r.Get("/{taskId}", h.GetAgentTask)
+						r.Patch("/{taskId}", h.UpdateAgentTask)
+					})
+				})
+			})
+		})
+	})
+}
+
 // runMigrations reads the schema SQL and executes it against the database.
 func runMigrations(db *sql.DB) error {
 	schemaPath := "pkg/db/schema.sql"
@@ -340,6 +329,9 @@ func runMigrations(db *sql.DB) error {
 
 	if _, err := db.Exec(string(schemaSQL)); err != nil {
 		return fmt.Errorf("exec schema: %w", err)
+	}
+	if err := backfillWorkspaceMembers(db); err != nil {
+		return err
 	}
 	if err := ensureColumn(db, "schemas", "source_type", "TEXT NOT NULL DEFAULT 'user'"); err != nil {
 		return err
@@ -390,6 +382,35 @@ func runMigrations(db *sql.DB) error {
 	// Migration 004: Move schema config from DB to git.
 	if err := migrateSchemasToGit(db); err != nil {
 		slog.Warn("schema-to-git migration skipped (non-fatal)", "error", err)
+	}
+
+	return nil
+}
+
+func backfillWorkspaceMembers(db *sql.DB) error {
+	var membershipCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workspace_members`).Scan(&membershipCount); err != nil {
+		return fmt.Errorf("count workspace members: %w", err)
+	}
+	if membershipCount > 0 {
+		return nil
+	}
+
+	var ownerID string
+	if err := db.QueryRow(`SELECT id FROM users ORDER BY created_at ASC, id ASC LIMIT 1`).Scan(&ownerID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("select oldest user for workspace backfill: %w", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role)
+		SELECT id, ?, 'owner'
+		FROM workspaces
+		WHERE slug <> 'builtin'
+	`, ownerID); err != nil {
+		return fmt.Errorf("backfill workspace members: %w", err)
 	}
 
 	return nil
