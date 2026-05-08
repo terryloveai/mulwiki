@@ -628,18 +628,22 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 
 	d.updateProgress(job.ID, 25)
 
-	// Drain messages (stream to job log) while waiting for the final result.
+	batcher := newTaskMessageBatcher(d, job.ID, task.ID, workdir, 500*time.Millisecond)
+	messagesDone := make(chan struct{})
+
+	// Drain messages while waiting for the final result.
 	go func() {
+		defer close(messagesDone)
 		for msg := range session.Messages {
 			slog.Debug("agent message", "job_id", job.ID, "type", msg.Type, "content", msg.Content[:min(len(msg.Content), 200)])
-			// Also stream to server as a log line for real-time SSE.
-			d.postLogLine(job.ID, string(msg.Type), msg.Content)
-			d.appendTaskMessage(agentCfg.ID, task.ID, msg)
+			batcher.Add(msg)
 		}
 	}()
 
 	// Wait for the result.
 	result, ok := <-session.Result
+	waitForMessages(messagesDone)
+	batcher.Close()
 	if !ok {
 		d.markTaskFailed(agentCfg.ID, task.ID, attempt, "result channel closed without result")
 		task.Status = "failed"
@@ -660,7 +664,7 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 			return
 		}
 
-		d.markTaskCompleted(agentCfg.ID, task.ID, outputStr, result.SessionID)
+		d.markTaskCompleted(agentCfg.ID, task.ID, outputStr, result.SessionID, workdir)
 		task.Status = "completed"
 		d.updateProgress(job.ID, 100)
 		d.completeJob(job.ID)
@@ -674,7 +678,7 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 		}
 		slog.Error("agent process failed", "job_id", job.ID, "task_id", task.ID, "attempt", attempt,
 			"status", result.Status, "error", result.Error)
-		d.markTaskFailed(agentCfg.ID, task.ID, attempt, errMsg, result.SessionID)
+		d.markTaskFailed(agentCfg.ID, task.ID, attempt, errMsg, result.SessionID, workdir)
 		task.Status = "failed"
 
 	default:
@@ -995,7 +999,51 @@ func taskStatusMessage(status, result, errMsg string) string {
 	}
 }
 
-func (d *Daemon) appendTaskMessage(agentID, taskID string, msg agent.Message) {
+type taskMessageBatcher struct {
+	d        *Daemon
+	jobID    string
+	taskID   string
+	workDir  string
+	interval time.Duration
+
+	mu            sync.Mutex
+	nextSeq       int64
+	pending       []protocol.AgentTaskMessage
+	pinnedSession bool
+	done          chan struct{}
+	closeOnce     sync.Once
+}
+
+func newTaskMessageBatcher(d *Daemon, jobID, taskID, workDir string, interval time.Duration) *taskMessageBatcher {
+	b := &taskMessageBatcher{
+		d:        d,
+		jobID:    jobID,
+		taskID:   taskID,
+		workDir:  workDir,
+		interval: interval,
+		nextSeq:  1,
+		done:     make(chan struct{}),
+	}
+	if interval > 0 {
+		go b.loop()
+	}
+	return b
+}
+
+func (b *taskMessageBatcher) loop() {
+	ticker := time.NewTicker(b.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			b.Flush()
+		case <-b.done:
+			return
+		}
+	}
+}
+
+func (b *taskMessageBatcher) Add(msg agent.Message) {
 	content := strings.TrimSpace(msg.Content)
 	if content == "" {
 		content = strings.TrimSpace(msg.Status)
@@ -1003,34 +1051,130 @@ func (d *Daemon) appendTaskMessage(agentID, taskID string, msg agent.Message) {
 	if content == "" && msg.Tool != "" {
 		content = msg.Tool
 	}
+	if content == "" && msg.Output != "" {
+		content = strings.TrimSpace(msg.Output)
+	}
 	if content == "" {
 		return
 	}
 
-	body := map[string]interface{}{
-		"messages": []map[string]interface{}{
-			{
-				"role":    "agent",
-				"content": content,
-				"metadata": map[string]interface{}{
-					"type":       string(msg.Type),
-					"tool":       msg.Tool,
-					"call_id":    msg.CallID,
-					"input":      msg.Input,
-					"output":     msg.Output,
-					"status":     msg.Status,
-					"level":      msg.Level,
-					"session_id": msg.SessionID,
-				},
-			},
-		},
-	}
+	b.d.postLogLine(b.jobID, string(msg.Type), content)
 	if msg.SessionID != "" {
-		body["session_id"] = msg.SessionID
+		b.pinSession(msg.SessionID)
 	}
-	if err := d.patchTask(agentID, taskID, body); err != nil {
-		slog.Debug("append task message failed", "task_id", taskID, "error", err)
+
+	input := json.RawMessage(`{}`)
+	if msg.Input != nil {
+		if raw, err := json.Marshal(msg.Input); err == nil {
+			input = raw
+		}
 	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	seq := b.nextSeq
+	b.nextSeq++
+	b.pending = append(b.pending, protocol.AgentTaskMessage{
+		Seq:       seq,
+		Type:      string(msg.Type),
+		Content:   content,
+		Tool:      msg.Tool,
+		CallID:    msg.CallID,
+		Input:     input,
+		Output:    msg.Output,
+		Status:    msg.Status,
+		Level:     msg.Level,
+		SessionID: msg.SessionID,
+	})
+}
+
+func (b *taskMessageBatcher) pinSession(sessionID string) {
+	b.mu.Lock()
+	if b.pinnedSession {
+		b.mu.Unlock()
+		return
+	}
+	b.pinnedSession = true
+	b.mu.Unlock()
+
+	if err := b.d.pinTaskSession(b.taskID, sessionID, b.workDir); err != nil {
+		slog.Debug("pin task session failed", "task_id", b.taskID, "error", err)
+	}
+}
+
+func (b *taskMessageBatcher) Flush() {
+	b.mu.Lock()
+	if len(b.pending) == 0 {
+		b.mu.Unlock()
+		return
+	}
+	messages := append([]protocol.AgentTaskMessage(nil), b.pending...)
+	b.pending = b.pending[:0]
+	b.mu.Unlock()
+
+	if err := b.d.appendTaskMessages(b.taskID, messages); err != nil {
+		slog.Debug("append task messages failed", "task_id", b.taskID, "error", err)
+	}
+}
+
+func (b *taskMessageBatcher) Close() {
+	b.closeOnce.Do(func() {
+		close(b.done)
+		b.Flush()
+	})
+}
+
+func waitForMessages(done <-chan struct{}) {
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		slog.Warn("timed out waiting for agent message drain")
+	}
+}
+
+func (d *Daemon) appendTaskMessages(taskID string, messages []protocol.AgentTaskMessage) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	url := fmt.Sprintf("%s/api/daemon/tasks/%s/messages", d.ServerURL, taskID)
+	body := map[string]any{"messages": messages}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal task messages: %w", err)
+	}
+	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("http post task messages: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("append task messages returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (d *Daemon) pinTaskSession(taskID, sessionID, workDir string) error {
+	if sessionID == "" && workDir == "" {
+		return nil
+	}
+	url := fmt.Sprintf("%s/api/daemon/tasks/%s/session", d.ServerURL, taskID)
+	body := map[string]string{
+		"session_id": sessionID,
+		"work_dir":   workDir,
+	}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal task session: %w", err)
+	}
+	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("http post task session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("pin task session returned status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // markTaskRunning marks the task as "running" (valid per DB CHECK constraint).
@@ -1041,8 +1185,8 @@ func (d *Daemon) markTaskStarted(agentID, taskID, workDir string) {
 }
 
 // markTaskCompleted marks the task as "completed" with a result summary.
-func (d *Daemon) markTaskCompleted(agentID, taskID, result, sessionID string) {
-	if err := d.updateTask(agentID, taskID, "completed", result, "", 0, sessionID, ""); err != nil {
+func (d *Daemon) markTaskCompleted(agentID, taskID, result, sessionID, workDir string) {
+	if err := d.updateTask(agentID, taskID, "completed", result, "", 0, sessionID, workDir); err != nil {
 		slog.Error("mark task completed failed", "task_id", taskID, "error", err)
 	}
 }
@@ -1050,10 +1194,14 @@ func (d *Daemon) markTaskCompleted(agentID, taskID, result, sessionID string) {
 // markTaskFailed marks the task as "failed" with an error message.
 func (d *Daemon) markTaskFailed(agentID, taskID string, attempt int, errMsg string, sessionID ...string) {
 	resumeID := ""
+	workDir := ""
 	if len(sessionID) > 0 {
 		resumeID = sessionID[0]
 	}
-	if err := d.updateTask(agentID, taskID, "failed", "", errMsg, attempt, resumeID, ""); err != nil {
+	if len(sessionID) > 1 {
+		workDir = sessionID[1]
+	}
+	if err := d.updateTask(agentID, taskID, "failed", "", errMsg, attempt, resumeID, workDir); err != nil {
 		slog.Error("mark task failed failed", "task_id", taskID, "error", err)
 	}
 }

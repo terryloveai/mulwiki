@@ -68,6 +68,26 @@ func newTestTaskService(t *testing.T) (*TaskService, *events.Bus, *sql.DB) {
 			max_attempts INTEGER NOT NULL DEFAULT 3,
 			created_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
+		CREATE TABLE agent_task_messages (
+			id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+			task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+			role TEXT NOT NULL DEFAULT 'agent',
+			seq INTEGER NOT NULL DEFAULT 0,
+			type TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL DEFAULT '',
+			tool TEXT NOT NULL DEFAULT '',
+			call_id TEXT NOT NULL DEFAULT '',
+			input TEXT NOT NULL DEFAULT '{}',
+			output TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			level TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			metadata TEXT NOT NULL DEFAULT '{}',
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE UNIQUE INDEX idx_agent_task_messages_task_seq_unique ON agent_task_messages(task_id, seq) WHERE seq > 0;
 		INSERT INTO workspaces (id, slug, name) VALUES ('ws1', 'test', 'Test Workspace');
 		INSERT INTO agent_runtimes (id, workspace_id, name, backend, path) VALUES ('rt1', 'ws1', 'Codex', 'codex', '/bin/codex');
 		INSERT INTO agents (id, workspace_id, runtime_id, name, max_concurrent_tasks) VALUES ('a1', 'ws1', 'rt1', 'Agent', 1);

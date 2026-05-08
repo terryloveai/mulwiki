@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -282,6 +283,105 @@ func (s *TaskService) RecoverOrphans(ctx context.Context, workspaceID, daemonID 
 	return recovered, nil
 }
 
+func (s *TaskService) AppendMessages(ctx context.Context, workspaceID, taskID string, messages []protocol.AgentTaskMessage) error {
+	var agentID string
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT agent_id FROM agent_tasks WHERE id = ? AND workspace_id = ?`,
+		taskID, workspaceID,
+	).Scan(&agentID); err != nil {
+		return err
+	}
+	if len(messages) == 0 {
+		return nil
+	}
+
+	var nextSeq int64
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_task_messages WHERE task_id = ?`,
+		taskID,
+	).Scan(&nextSeq); err != nil {
+		return err
+	}
+
+	for _, msg := range messages {
+		seq := msg.Seq
+		if seq <= 0 {
+			seq = nextSeq
+			nextSeq++
+		} else if seq >= nextSeq {
+			nextSeq = seq + 1
+		}
+
+		role := msg.Role
+		if role == "" {
+			role = "agent"
+		}
+		input := defaultJSON(msg.Input)
+		if !json.Valid(input) {
+			return fmt.Errorf("invalid task message input")
+		}
+		metadata := defaultJSON(msg.Metadata)
+		if !json.Valid(metadata) {
+			return fmt.Errorf("invalid task message metadata")
+		}
+
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT OR IGNORE INTO agent_task_messages
+			 (task_id, workspace_id, agent_id, role, seq, type, content, tool, call_id, input, output, status, level, session_id, metadata)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			taskID, workspaceID, agentID, role, seq, msg.Type, msg.Content, msg.Tool, msg.CallID,
+			string(input), msg.Output, msg.Status, msg.Level, msg.SessionID, string(metadata),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *TaskService) ListMessages(ctx context.Context, workspaceID, taskID string, sinceSeq int64) ([]protocol.AgentTaskMessage, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT m.id, m.task_id, m.workspace_id, m.agent_id, m.role,
+		        m.seq, m.type, m.content, m.tool, m.call_id, m.input, m.output,
+		        m.status, m.level, m.session_id, m.metadata, m.created_at
+		 FROM agent_task_messages m
+		 JOIN agent_tasks t ON t.id = m.task_id AND t.workspace_id = m.workspace_id
+		 WHERE m.task_id = ? AND t.workspace_id = ? AND m.seq > ?
+		 ORDER BY m.seq ASC, m.created_at ASC, m.id ASC`,
+		taskID, workspaceID, sinceSeq,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	messages := make([]protocol.AgentTaskMessage, 0)
+	for rows.Next() {
+		msg, err := scanTaskMessage(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, *msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+func (s *TaskService) PinSession(ctx context.Context, workspaceID, taskID, sessionID, workDir string) error {
+	if sessionID == "" && workDir == "" {
+		return nil
+	}
+	result, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_tasks
+		 SET session_id = CASE WHEN ? != '' THEN ? ELSE session_id END,
+		     work_dir = CASE WHEN ? != '' THEN ? ELSE work_dir END
+		 WHERE id = ? AND workspace_id = ?`,
+		sessionID, sessionID, workDir, workDir, taskID, workspaceID,
+	)
+	return rowsAffectedOrNotFound(result, err)
+}
+
 func (s *TaskService) checkLifecycleUpdate(ctx context.Context, result sql.Result, err error, taskID, workspaceID string) error {
 	if err != nil {
 		return err
@@ -315,4 +415,41 @@ func (s *TaskService) publish(eventType events.EventType, task *protocol.AgentTa
 		TaskID:      task.ID,
 		Payload:     *task,
 	})
+}
+
+func defaultJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
+func scanTaskMessage(scan func(dest ...any) error) (*protocol.AgentTaskMessage, error) {
+	var msg protocol.AgentTaskMessage
+	var input, metadata string
+	err := scan(
+		&msg.ID,
+		&msg.TaskID,
+		&msg.WorkspaceID,
+		&msg.AgentID,
+		&msg.Role,
+		&msg.Seq,
+		&msg.Type,
+		&msg.Content,
+		&msg.Tool,
+		&msg.CallID,
+		&input,
+		&msg.Output,
+		&msg.Status,
+		&msg.Level,
+		&msg.SessionID,
+		&metadata,
+		&msg.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	msg.Input = json.RawMessage(input)
+	msg.Metadata = json.RawMessage(metadata)
+	return &msg, nil
 }

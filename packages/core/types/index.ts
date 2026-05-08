@@ -191,9 +191,22 @@ export interface AgentTaskMessage {
   workspace_id: string;
   agent_id: string;
   role: string;
+  seq: number;
+  type: string;
   content: string;
+  tool: string;
+  call_id: string;
+  input: Record<string, unknown>;
+  output: string;
+  status: string;
+  level: string;
+  session_id: string;
   metadata: Record<string, unknown>;
   created_at: string;
+}
+
+export interface TaskMessagesResponse {
+  messages: AgentTaskMessage[];
 }
 
 /* ── Request / Response shapes ── */

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -902,6 +903,10 @@ func (h *Handler) updateAgentTaskMetadata(taskID, status, resultText, taskError 
 }
 
 func (h *Handler) insertAgentTaskMessages(workspaceID, agentID, taskID string, messages []protocol.AgentTaskMessageInput) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	taskMessages := make([]protocol.AgentTaskMessage, 0, len(messages))
 	for _, msg := range messages {
 		content := strings.TrimSpace(msg.Content)
 		if content == "" {
@@ -918,23 +923,34 @@ func (h *Handler) insertAgentTaskMessages(workspaceID, agentID, taskID string, m
 		if !json.Valid(metadata) {
 			return errInvalidTaskMessageMetadata
 		}
-		if _, err := h.DB.Exec(
-			`INSERT INTO agent_task_messages (task_id, workspace_id, agent_id, role, content, metadata)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			taskID, workspaceID, agentID, role, content, string(metadata),
-		); err != nil {
-			return err
-		}
+		taskMessages = append(taskMessages, protocol.AgentTaskMessage{
+			TaskID:      taskID,
+			WorkspaceID: workspaceID,
+			AgentID:     agentID,
+			Role:        role,
+			Seq:         msg.Seq,
+			Type:        msg.Type,
+			Content:     content,
+			Tool:        msg.Tool,
+			CallID:      msg.CallID,
+			Input:       msg.Input,
+			Output:      msg.Output,
+			Status:      msg.Status,
+			Level:       msg.Level,
+			SessionID:   msg.SessionID,
+			Metadata:    metadata,
+		})
 	}
-	return nil
+	return service.NewTaskService(h.DB, h.EventBus).AppendMessages(context.Background(), workspaceID, taskID, taskMessages)
 }
 
 func (h *Handler) loadAgentTaskMessages(taskID string) ([]protocol.AgentTaskMessage, error) {
 	rows, err := h.DB.Query(
-		`SELECT id, task_id, workspace_id, agent_id, role, content, metadata, created_at
+		`SELECT id, task_id, workspace_id, agent_id, role, seq, type, content,
+		        tool, call_id, input, output, status, level, session_id, metadata, created_at
 		 FROM agent_task_messages
 		 WHERE task_id = ?
-		 ORDER BY created_at ASC, id ASC`,
+		 ORDER BY seq ASC, created_at ASC, id ASC`,
 		taskID,
 	)
 	if err != nil {
@@ -945,10 +961,15 @@ func (h *Handler) loadAgentTaskMessages(taskID string) ([]protocol.AgentTaskMess
 	messages := make([]protocol.AgentTaskMessage, 0)
 	for rows.Next() {
 		var msg protocol.AgentTaskMessage
-		var metadata string
-		if err := rows.Scan(&msg.ID, &msg.TaskID, &msg.WorkspaceID, &msg.AgentID, &msg.Role, &msg.Content, &metadata, &msg.CreatedAt); err != nil {
+		var input, metadata string
+		if err := rows.Scan(
+			&msg.ID, &msg.TaskID, &msg.WorkspaceID, &msg.AgentID, &msg.Role,
+			&msg.Seq, &msg.Type, &msg.Content, &msg.Tool, &msg.CallID, &input,
+			&msg.Output, &msg.Status, &msg.Level, &msg.SessionID, &metadata, &msg.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
+		msg.Input = json.RawMessage(input)
 		msg.Metadata = json.RawMessage(metadata)
 		messages = append(messages, msg)
 	}

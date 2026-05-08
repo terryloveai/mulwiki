@@ -142,6 +142,11 @@ func main() {
 	// --- Workspace routes ---
 	mountWorkspaceRoutes(r, db, h)
 
+	r.Route("/api/tasks", func(r chi.Router) {
+		r.Use(middleware.Auth(db))
+		r.Get("/{taskId}/messages", h.ListTaskMessages)
+	})
+
 	// --- Daemon routes ---
 	r.Route("/api/daemon", func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(db))
@@ -149,6 +154,8 @@ func main() {
 		r.Post("/register", h.DaemonRegister)
 		r.Post("/heartbeat", h.DaemonHeartbeat)
 		r.Get("/stale", h.DaemonStale)
+		r.Post("/tasks/{taskId}/messages", h.AppendTaskMessages)
+		r.Post("/tasks/{taskId}/session", h.PinTaskSession)
 		r.Get("/{id}/logs", h.GetDaemonLogs)
 		r.Post("/{id}/stop", h.StopDaemon)
 		r.Post("/start", h.StartDaemon)
@@ -380,6 +387,27 @@ func runMigrations(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_agent_tasks_job ON agent_tasks(job_id)`); err != nil {
 		return fmt.Errorf("create agent_tasks job index: %w", err)
+	}
+	for _, col := range []struct {
+		name       string
+		definition string
+	}{
+		{"seq", "INTEGER NOT NULL DEFAULT 0"},
+		{"type", "TEXT NOT NULL DEFAULT ''"},
+		{"tool", "TEXT NOT NULL DEFAULT ''"},
+		{"call_id", "TEXT NOT NULL DEFAULT ''"},
+		{"input", "TEXT NOT NULL DEFAULT '{}'"},
+		{"output", "TEXT NOT NULL DEFAULT ''"},
+		{"status", "TEXT NOT NULL DEFAULT ''"},
+		{"level", "TEXT NOT NULL DEFAULT ''"},
+		{"session_id", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumn(db, "agent_task_messages", col.name, col.definition); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_messages_task_seq ON agent_task_messages(task_id, seq) WHERE seq > 0`); err != nil {
+		return fmt.Errorf("create agent_task_messages seq index: %w", err)
 	}
 
 	slog.Info("migrations applied successfully")

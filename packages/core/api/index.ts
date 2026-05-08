@@ -6,7 +6,7 @@ import type {
   RuntimesResponse, RuntimeResponse,
   AgentsResponse, AgentResponse,
   SkillsResponse, SkillResponse,
-  TasksResponse, TaskResponse,
+  TasksResponse, TaskResponse, TaskMessagesResponse,
   CreateRuntimeRequest, UpdateRuntimeRequest,
   CreateAgentRequest, UpdateAgentRequest,
   CreateSkillRequest, UpdateSkillRequest,
@@ -201,4 +201,6 @@ export const api = {
     fetchJSON<TasksResponse>(`/workspaces/${ws}/agents/${agentId}/tasks`),
   getAgentTask: (ws: string, agentId: string, taskId: string) =>
     fetchJSON<TaskResponse>(`/workspaces/${ws}/agents/${agentId}/tasks/${taskId}`),
+  listTaskMessages: (taskId: string, since = 0) =>
+    fetchJSON<TaskMessagesResponse>(`/tasks/${taskId}/messages?since=${since}`),
 };

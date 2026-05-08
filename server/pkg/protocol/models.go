@@ -295,15 +295,33 @@ type AgentTaskMessage struct {
 	WorkspaceID string          `json:"workspace_id"`
 	AgentID     string          `json:"agent_id"`
 	Role        string          `json:"role"`
+	Seq         int64           `json:"seq"`
+	Type        string          `json:"type"`
 	Content     string          `json:"content"`
+	Tool        string          `json:"tool"`
+	CallID      string          `json:"call_id"`
+	Input       json.RawMessage `json:"input"`
+	Output      string          `json:"output"`
+	Status      string          `json:"status"`
+	Level       string          `json:"level"`
+	SessionID   string          `json:"session_id"`
 	Metadata    json.RawMessage `json:"metadata"`
 	CreatedAt   string          `json:"created_at"`
 }
 
 type AgentTaskMessageInput struct {
-	Role     string          `json:"role"`
-	Content  string          `json:"content"`
-	Metadata json.RawMessage `json:"metadata,omitempty"`
+	Role      string          `json:"role"`
+	Seq       int64           `json:"seq,omitempty"`
+	Type      string          `json:"type,omitempty"`
+	Content   string          `json:"content"`
+	Tool      string          `json:"tool,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	Output    string          `json:"output,omitempty"`
+	Status    string          `json:"status,omitempty"`
+	Level     string          `json:"level,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
 // Daemon models.

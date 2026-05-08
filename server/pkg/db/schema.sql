@@ -147,7 +147,16 @@ CREATE TABLE IF NOT EXISTS agent_task_messages (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     role TEXT NOT NULL DEFAULT 'daemon',
+    seq INTEGER NOT NULL DEFAULT 0,
+    type TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL DEFAULT '',
+    tool TEXT NOT NULL DEFAULT '',
+    call_id TEXT NOT NULL DEFAULT '',
+    input TEXT NOT NULL DEFAULT '{}',
+    output TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    level TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -192,5 +201,6 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_workspace ON agent_tasks(workspace_id
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_agent_task_messages_task ON agent_task_messages(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_task_messages_workspace ON agent_task_messages(workspace_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_messages_task_seq ON agent_task_messages(task_id, seq) WHERE seq > 0;
 CREATE INDEX IF NOT EXISTS idx_daemon_tokens_workspace ON daemon_tokens(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_daemon_tokens_daemon ON daemon_tokens(daemon_id);

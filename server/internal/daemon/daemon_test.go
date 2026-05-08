@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/tethy/mulwiki/server/pkg/agent"
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
@@ -79,6 +81,85 @@ func TestNewDaemonRequestUsesConfiguredDaemonToken(t *testing.T) {
 	}
 	if got := req.Header.Get("X-Daemon-ID"); got != "daemon-1" {
 		t.Fatalf("expected X-Daemon-ID daemon-1, got %q", got)
+	}
+}
+
+func TestTaskMessageBatcherFlushesMessagesAndPinsSession(t *testing.T) {
+	srv, mux := setupMockServer(t)
+
+	messageCalls := make(chan []protocol.AgentTaskMessage, 1)
+	sessionCalls := make(chan map[string]string, 1)
+	logCalls := make(chan map[string]string, 2)
+
+	mux.HandleFunc("/api/daemon/tasks/task-1/messages", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST /messages, got %s", r.Method)
+		}
+		var body struct {
+			Messages []protocol.AgentTaskMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode messages: %v", err)
+		}
+		messageCalls <- body.Messages
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/api/daemon/tasks/task-1/session", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode session: %v", err)
+		}
+		sessionCalls <- body
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/job-1/log-line", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode log: %v", err)
+		}
+		logCalls <- body
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	d := New(Config{ServerURL: srv.URL, WorkspaceSlug: "test", DaemonID: "daemon-1"})
+	batcher := newTaskMessageBatcher(d, "job-1", "task-1", "/tmp/work", 10*time.Millisecond)
+	batcher.Add(agent.Message{Type: agent.MessageStatus, Status: "running", SessionID: "sess-1"})
+	batcher.Add(agent.Message{Type: agent.MessageText, Content: "hello"})
+	batcher.Close()
+
+	select {
+	case messages := <-messageCalls:
+		if len(messages) != 2 {
+			t.Fatalf("expected 2 messages, got %d: %#v", len(messages), messages)
+		}
+		if messages[0].Seq != 1 || messages[0].Type != "status" || messages[0].SessionID != "sess-1" {
+			t.Fatalf("unexpected first message: %#v", messages[0])
+		}
+		if messages[1].Seq != 2 || messages[1].Type != "text" || messages[1].Content != "hello" {
+			t.Fatalf("unexpected second message: %#v", messages[1])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for messages call")
+	}
+
+	select {
+	case session := <-sessionCalls:
+		if session["session_id"] != "sess-1" || session["work_dir"] != "/tmp/work" {
+			t.Fatalf("unexpected session body: %#v", session)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for session call")
+	}
+
+	for i := 0; i < 2; i++ {
+		select {
+		case log := <-logCalls:
+			if log["line"] == "" {
+				t.Fatalf("expected log line, got %#v", log)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for log call")
+		}
 	}
 }
 

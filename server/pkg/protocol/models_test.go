@@ -131,6 +131,39 @@ func TestJobJSON_NilCompletedAt(t *testing.T) {
 	_ = raw // used
 }
 
+func TestAgentTaskMessageJSONStructuredFields(t *testing.T) {
+	msg := AgentTaskMessage{
+		ID:        "msg-1",
+		TaskID:    "task-1",
+		Seq:       7,
+		Type:      "tool-use",
+		Content:   "running command",
+		Tool:      "exec_command",
+		CallID:    "call-1",
+		Input:     json.RawMessage(`{"cmd":"go test ./..."}`),
+		Output:    "ok",
+		Status:    "running",
+		Level:     "info",
+		SessionID: "sess-1",
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got AgentTaskMessage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Seq != 7 || got.Type != "tool-use" || got.Tool != "exec_command" || got.CallID != "call-1" || got.SessionID != "sess-1" {
+		t.Fatalf("structured fields did not round-trip: %#v", got)
+	}
+	if string(got.Input) != `{"cmd":"go test ./..."}` {
+		t.Fatalf("input did not round-trip: %s", string(got.Input))
+	}
+}
+
 func TestAgentJSON_WithSkills(t *testing.T) {
 	a := Agent{
 		ID:          "agent-1",
@@ -279,8 +312,8 @@ func TestDaemonRegisterRequestJSON(t *testing.T) {
 
 func TestDaemonRegisterRequestJSON_EmptyRuntimes(t *testing.T) {
 	req := DaemonRegisterRequest{
-		ID:        "daemon-min",
-		Runtimes:  nil,
+		ID:       "daemon-min",
+		Runtimes: nil,
 	}
 	data, _ := json.Marshal(req)
 
@@ -372,7 +405,7 @@ func TestSchemaWithActiveJSON(t *testing.T) {
 			WorkspaceID: "ws-1",
 			Name:        "Knowledge Graph",
 			Version:     "1.0.0",
-			Content:      "# Types\n- Fact\n- Concept",
+			Content:     "# Types\n- Fact\n- Concept",
 		},
 		IsActive: true,
 	}
