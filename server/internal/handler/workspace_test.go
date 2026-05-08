@@ -20,6 +20,7 @@ func TestCreateWorkspace(t *testing.T) {
 	body := `{"name":"My Workspace","slug":"my-workspace","description":"Test workspace"}`
 	req := chiRequest(http.MethodPost, "/api/workspaces", nil, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", "dev-user")
 	rr := httptest.NewRecorder()
 
 	h.CreateWorkspace(rr, req)
@@ -40,6 +41,17 @@ func TestCreateWorkspace(t *testing.T) {
 	}
 	if ws.Description != "Test workspace" {
 		t.Errorf("expected description, got '%s'", ws.Description)
+	}
+
+	var role string
+	if err := h.DB.QueryRow(
+		`SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = 'dev-user'`,
+		ws.ID,
+	).Scan(&role); err != nil {
+		t.Fatalf("expected workspace owner membership: %v", err)
+	}
+	if role != "owner" {
+		t.Errorf("expected owner role, got %q", role)
 	}
 }
 
@@ -123,8 +135,10 @@ func TestListWorkspaces(t *testing.T) {
 	h := newTestHandler(t)
 	// Seed extra workspaces (one already exists in newTestHandler).
 	h.DB.Exec(`INSERT INTO workspaces (id, slug, name, description) VALUES ('ws2', 'workspace-2', 'WS2', 'desc2')`)
+	h.DB.Exec(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws2', 'dev-user', 'member')`)
 
 	req := chiRequest(http.MethodGet, "/api/workspaces", nil, nil)
+	req.Header.Set("X-User-ID", "dev-user")
 	rr := httptest.NewRecorder()
 
 	h.ListWorkspaces(rr, req)
@@ -141,6 +155,33 @@ func TestListWorkspaces(t *testing.T) {
 	// Should have ws2 + test-workspace (but builtin is filtered).
 	if len(wss) < 1 {
 		t.Errorf("expected at least 1 workspace, got %d", len(wss))
+	}
+}
+
+func TestListWorkspaces_FiltersByMembership(t *testing.T) {
+	h := newTestHandler(t)
+	h.DB.Exec(`INSERT INTO users (id, email, password_hash) VALUES ('other-user', 'other@mulwiki.local', 'hash')`)
+	h.DB.Exec(`INSERT INTO workspaces (id, slug, name, description) VALUES ('ws2', 'workspace-2', 'WS2', 'desc2')`)
+	h.DB.Exec(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws2', 'other-user', 'owner')`)
+
+	req := chiRequest(http.MethodGet, "/api/workspaces", nil, nil)
+	req.Header.Set("X-User-ID", "dev-user")
+	rr := httptest.NewRecorder()
+
+	h.ListWorkspaces(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	var wss []protocol.Workspace
+	if err := json.NewDecoder(rr.Body).Decode(&wss); err != nil {
+		t.Fatalf("decode workspaces: %v", err)
+	}
+	for _, ws := range wss {
+		if ws.Slug == "workspace-2" {
+			t.Fatalf("expected workspace-2 to be filtered out for dev-user")
+		}
 	}
 }
 

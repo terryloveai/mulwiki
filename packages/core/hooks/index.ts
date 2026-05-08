@@ -1,5 +1,7 @@
+import { useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
+import { queryKeys } from "../api/queries";
 import type {
   CreateRuntimeRequest,
   UpdateRuntimeRequest,
@@ -264,4 +266,38 @@ export function useAgentTask(ws: string, agentId: string, taskId: string) {
     select: (data) => data.task,
     enabled: !!agentId && !!taskId,
   });
+}
+
+type RealtimeEvent = {
+  type?: string;
+  workspace_id?: string;
+  agent_id?: string;
+  task_id?: string;
+};
+
+export function useWorkspaceRealtime(workspaceId?: string | null) {
+  const qc = useQueryClient();
+
+  useEffect(() => {
+    if (!workspaceId || typeof window === "undefined") return;
+
+    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(
+      `${scheme}://${window.location.host}/ws?workspace_id=${encodeURIComponent(workspaceId)}`,
+    );
+
+    socket.onmessage = (message) => {
+      const event = JSON.parse(message.data) as RealtimeEvent;
+      if (event.type?.startsWith("task.")) {
+        qc.invalidateQueries({ queryKey: ["jobs"] });
+        qc.invalidateQueries({ queryKey: ["agents"] });
+      }
+      if (event.type?.startsWith("daemon.")) {
+        qc.invalidateQueries({ queryKey: queryKeys.daemons() });
+        qc.invalidateQueries({ queryKey: ["agents"] });
+      }
+    };
+
+    return () => socket.close();
+  }, [qc, workspaceId]);
 }

@@ -246,9 +246,9 @@ func (h *Handler) DaemonStale(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":       "ok",
+		"status":        "ok",
 		"offline_count": affected,
-		"threshold":    staleAfter.String(),
+		"threshold":     staleAfter.String(),
 	})
 }
 
@@ -265,14 +265,14 @@ func (h *Handler) ListDaemons(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type daemonItem struct {
-		ID                  string `json:"id"`
-		Hostname            string `json:"hostname"`
-		PID                 int    `json:"pid"`
-		Version             string `json:"version"`
-		RuntimeIDs          string `json:"runtime_ids"`
-		MaxConcurrentTasks  int    `json:"max_concurrent_tasks"`
-		LastHeartbeat       string `json:"last_heartbeat"`
-		RegisteredAt        string `json:"registered_at"`
+		ID                 string `json:"id"`
+		Hostname           string `json:"hostname"`
+		PID                int    `json:"pid"`
+		Version            string `json:"version"`
+		RuntimeIDs         string `json:"runtime_ids"`
+		MaxConcurrentTasks int    `json:"max_concurrent_tasks"`
+		LastHeartbeat      string `json:"last_heartbeat"`
+		RegisteredAt       string `json:"registered_at"`
 	}
 
 	daemons := make([]daemonItem, 0)

@@ -14,35 +14,40 @@ type JobService struct {
 	DB *sql.DB
 }
 
+type CreateJobInput struct {
+	WorkspaceID  string
+	AgentID      string
+	SourcePath   string
+	SourcePaths  []string
+	SchemaID     string
+	InitialClaim string
+}
+
 // NewJobService creates a new JobService.
 func NewJobService(db *sql.DB) *JobService {
 	return &JobService{DB: db}
 }
 
 // CreateJob inserts a new pending job and returns it.
-func (s *JobService) CreateJob(workspaceID, sourceID, schemaID string) (*protocol.Job, error) {
+func (s *JobService) CreateJob(input CreateJobInput) (*protocol.Job, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	sourcePathsJSON, _ := json.Marshal(input.SourcePaths)
+	if string(sourcePathsJSON) == "null" {
+		sourcePathsJSON = []byte("[]")
+	}
 
-	var j protocol.Job
-	var completedAt *string
-	var sourceIDsRaw string
-	err := s.DB.QueryRow(
-		`INSERT INTO jobs (workspace_id, status, source_path, source_paths, schema_id, created_at)
-		 VALUES (?, 'pending', ?, '[]', ?, ?)
+	row := s.DB.QueryRow(
+		`INSERT INTO jobs (workspace_id, status, agent_id, source_path, source_paths, schema_id, claimed_by, created_at)
+		 VALUES (?, 'pending', ?, ?, ?, ?, ?, ?)
 		 RETURNING id, workspace_id, status, agent_id, source_path, source_paths, schema_id, progress, error,
 		           claimed_by, created_at, completed_at`,
-		workspaceID, sourceID, schemaID, now,
-	).Scan(&j.ID, &j.WorkspaceID, &j.Status, &j.AgentID,
-		&j.SourcePath, &sourceIDsRaw, &j.SchemaID, &j.Progress, &j.Error, &j.ClaimedBy, &j.CreatedAt, &completedAt)
+		input.WorkspaceID, input.AgentID, input.SourcePath, string(sourcePathsJSON), input.SchemaID, input.InitialClaim, now,
+	)
+	j, err := scanJob(row.Scan)
 	if err != nil {
 		return nil, fmt.Errorf("create job: %w", err)
 	}
-	j.CompletedAt = completedAt
-	json.Unmarshal([]byte(sourceIDsRaw), &j.SourcePaths)
-	if j.SourcePaths == nil {
-		j.SourcePaths = []string{}
-	}
-	return &j, nil
+	return j, nil
 }
 
 // ClaimJob atomically claims the next pending job for the given workspace.
@@ -53,7 +58,7 @@ func (s *JobService) ClaimJob(workspaceID, daemonID string) (*protocol.Job, erro
 	}
 	defer tx.Rollback()
 
-	// Pick the oldest pending job in this workspace
+	// Pick the oldest pending job in this workspace.
 	var jobID string
 	err = tx.QueryRow(
 		`SELECT id FROM jobs
@@ -68,8 +73,7 @@ func (s *JobService) ClaimJob(workspaceID, daemonID string) (*protocol.Job, erro
 		return nil, fmt.Errorf("claim query: %w", err)
 	}
 
-	// Atomically claim it
-	now := time.Now().Format(time.RFC3339)
+	// Atomically claim it.
 	_, err = tx.Exec(
 		`UPDATE jobs SET status = 'running', claimed_by = ? WHERE id = ? AND status = 'pending'`,
 		daemonID, jobID,
@@ -82,75 +86,129 @@ func (s *JobService) ClaimJob(workspaceID, daemonID string) (*protocol.Job, erro
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
-	// Fetch the claimed job
-	var j protocol.Job
-	var completedAt *string
-	var sourceIDsRaw string
-	err = s.DB.QueryRow(
+	// Fetch the claimed job.
+	row := s.DB.QueryRow(
 		`SELECT id, workspace_id, status, agent_id, source_path, source_paths, schema_id, progress, error,
 		        claimed_by, created_at, completed_at
 		 FROM jobs WHERE id = ?`, jobID,
-	).Scan(&j.ID, &j.WorkspaceID, &j.Status, &j.AgentID,
-		&j.SourcePath, &sourceIDsRaw, &j.SchemaID, &j.Progress, &j.Error, &j.ClaimedBy, &now, &completedAt)
+	)
+	j, err := scanJob(row.Scan)
 	if err != nil {
 		return nil, fmt.Errorf("fetch claimed job: %w", err)
 	}
-	j.CreatedAt = now
-	j.CompletedAt = completedAt
-	json.Unmarshal([]byte(sourceIDsRaw), &j.SourcePaths)
-	if j.SourcePaths == nil {
-		j.SourcePaths = []string{}
-	}
-	return &j, nil
+	return j, nil
 }
 
 // CompleteJob marks a job as completed.
-func (s *JobService) CompleteJob(jobID string, progress int) error {
+func (s *JobService) CompleteJob(workspaceID, jobID string, progress int) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.DB.Exec(
-		`UPDATE jobs SET status = 'completed', progress = ?, completed_at = ? WHERE id = ?`,
-		progress, now, jobID,
+	result, err := s.DB.Exec(
+		`UPDATE jobs SET status = 'completed', progress = ?, completed_at = ? WHERE id = ? AND workspace_id = ?`,
+		progress, now, jobID, workspaceID,
 	)
-	return err
+	return rowsAffectedOrNotFound(result, err)
 }
 
 // FailJob marks a job as failed with an error message.
-func (s *JobService) FailJob(jobID string, errMsg string) error {
+func (s *JobService) FailJob(workspaceID, jobID string, errMsg string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.DB.Exec(
-		`UPDATE jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ?`,
-		errMsg, now, jobID,
+	result, err := s.DB.Exec(
+		`UPDATE jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ? AND workspace_id = ?`,
+		errMsg, now, jobID, workspaceID,
 	)
-	return err
+	return rowsAffectedOrNotFound(result, err)
 }
 
 // UpdateJobProgress updates the progress of a running job.
-func (s *JobService) UpdateJobProgress(jobID string, progress int) error {
-	_, err := s.DB.Exec(
-		`UPDATE jobs SET progress = ? WHERE id = ?`,
-		progress, jobID,
+func (s *JobService) UpdateJobProgress(workspaceID, jobID string, progress int) error {
+	result, err := s.DB.Exec(
+		`UPDATE jobs SET progress = ? WHERE id = ? AND workspace_id = ?`,
+		progress, jobID, workspaceID,
 	)
-	return err
+	return rowsAffectedOrNotFound(result, err)
 }
 
 // GetJob returns a job by ID.
 func (s *JobService) GetJob(jobID string) (*protocol.Job, error) {
-	var j protocol.Job
-	var completedAt *string
-	var sourceIDsRaw string
-	err := s.DB.QueryRow(
+	row := s.DB.QueryRow(
 		`SELECT id, workspace_id, status, agent_id, source_path, source_paths, schema_id, progress, error,
 		        claimed_by, created_at, completed_at
 		 FROM jobs WHERE id = ?`, jobID,
-	).Scan(&j.ID, &j.WorkspaceID, &j.Status, &j.AgentID,
-		&j.SourcePath, &sourceIDsRaw, &j.SchemaID, &j.Progress, &j.Error, &j.ClaimedBy, &j.CreatedAt, &completedAt)
+	)
+	j, err := scanJob(row.Scan)
 	if err != nil {
 		return nil, fmt.Errorf("get job: %w", err)
 	}
+	return j, nil
+}
+
+// GetWorkspaceJob returns a job by ID scoped to a workspace.
+func (s *JobService) GetWorkspaceJob(workspaceID, jobID string) (*protocol.Job, error) {
+	row := s.DB.QueryRow(
+		`SELECT id, workspace_id, status, agent_id, source_path, source_paths, schema_id, progress, error,
+		        claimed_by, created_at, completed_at
+		 FROM jobs WHERE id = ? AND workspace_id = ?`, jobID, workspaceID,
+	)
+	j, err := scanJob(row.Scan)
+	if err != nil {
+		return nil, fmt.Errorf("get workspace job: %w", err)
+	}
+	return j, nil
+}
+
+// ListJobs lists jobs scoped to a workspace.
+func (s *JobService) ListJobs(workspaceID string) ([]protocol.Job, error) {
+	rows, err := s.DB.Query(
+		`SELECT id, workspace_id, status, agent_id, source_path, source_paths, schema_id, progress, error,
+		        claimed_by, created_at, completed_at
+		 FROM jobs WHERE workspace_id = ? ORDER BY created_at DESC`, workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	defer rows.Close()
+
+	jobs := make([]protocol.Job, 0)
+	for rows.Next() {
+		j, err := scanJob(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("scan job: %w", err)
+		}
+		jobs = append(jobs, *j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate jobs: %w", err)
+	}
+	return jobs, nil
+}
+
+func scanJob(scan func(dest ...any) error) (*protocol.Job, error) {
+	var j protocol.Job
+	var completedAt *string
+	var sourcePathsRaw string
+	err := scan(&j.ID, &j.WorkspaceID, &j.Status, &j.AgentID,
+		&j.SourcePath, &sourcePathsRaw, &j.SchemaID, &j.Progress, &j.Error, &j.ClaimedBy, &j.CreatedAt, &completedAt)
+	if err != nil {
+		return nil, err
+	}
 	j.CompletedAt = completedAt
-	json.Unmarshal([]byte(sourceIDsRaw), &j.SourcePaths)
+	json.Unmarshal([]byte(sourcePathsRaw), &j.SourcePaths)
 	if j.SourcePaths == nil {
 		j.SourcePaths = []string{}
 	}
 	return &j, nil
+}
+
+func rowsAffectedOrNotFound(result sql.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }

@@ -28,6 +28,20 @@ mulwiki/
 └── scripts/           Dev helpers
 ```
 
+## Architecture Guardrails
+
+Mulwiki intentionally follows Multica's boundary shape, not its full stack:
+
+- Keep chi route groups as the backend composition boundary. Public auth and health routes are explicit; workspace routes must run through Auth, Workspace, then Role middleware.
+- Treat `workspace_members` as the tenant boundary. A request is workspace-scoped only after membership has been resolved into context.
+- Keep handlers thin. Handlers decode HTTP, call service/store code, publish events, and serialize responses.
+- Put lifecycle rules in services. Claiming, dispatching, completing, failing, and retrying jobs or agent tasks should not be duplicated in handlers and daemon code.
+- Keep schema Markdown decoupled from agents. Ingest combines Sources + Schema + Agent at job/task creation time.
+- Use `packages/core` for API clients, query keys, query options, hooks, and shared types. Use `packages/views` for page-level React components. `apps/web/app` route files should be thin route adapters.
+- Use React Query as the source of truth for server state. Do not introduce a separate client store for data fetched from the API.
+
+Do not port Multica details that do not fit Mulwiki's current shape: PostgreSQL, Redis queues, desktop window orchestration, GORM, or model selection at runtime level.
+
 ## Core Concepts
 
 ### Workspace

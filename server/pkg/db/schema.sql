@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (workspace_id, user_id)
+);
+
 -- sources and wiki_pages are gone — all content is stored in per-workspace bare git repos.
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -132,6 +140,17 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS agent_task_messages (
+    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'daemon',
+    content TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS daemon_registrations (
     id TEXT PRIMARY KEY,
     hostname TEXT NOT NULL DEFAULT '',
@@ -147,6 +166,8 @@ CREATE INDEX IF NOT EXISTS idx_schemas_workspace ON schemas(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_workspaces_active_schema ON workspaces(active_schema_id);
 CREATE INDEX IF NOT EXISTS idx_schemas_derived_from ON schemas(derived_from);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_members_workspace ON workspace_members(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_workspace ON jobs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_agent_runtimes_workspace ON agent_runtimes(workspace_id);
@@ -157,3 +178,5 @@ CREATE INDEX IF NOT EXISTS idx_agent_skills_workspace ON agent_skills(workspace_
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_agent ON agent_tasks(agent_id);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_workspace ON agent_tasks(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_agent_task_messages_task ON agent_task_messages(task_id);
+CREATE INDEX IF NOT EXISTS idx_agent_task_messages_workspace ON agent_task_messages(workspace_id);

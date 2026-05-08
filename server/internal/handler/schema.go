@@ -528,11 +528,11 @@ func (h *Handler) readSchemaFromGit(workspaceID, gitPath string) string {
 // builtinSchemaMeta maps schema filenames to display names.
 var builtinSchemaMeta = map[string]string{
 	"karpathy-llm-wiki-schema.md":  "Karpathy 原始",
-	"concept-wiki-schema.md":        "concept-wiki (9层本体)",
-	"nashsu-llm-wiki-schema.md":     "nashsu (CoT + 知识图谱)",
-	"llm-knowledge-base-schema.md":  "llm-knowledge-base (极简3类)",
-	"paper-spec-wiki-schema.md":     "paper-spec wiki (学术7类)",
-	"paper-spec-paper-schema.md":    "paper-spec paper (论文剖面)",
+	"concept-wiki-schema.md":       "concept-wiki (9层本体)",
+	"nashsu-llm-wiki-schema.md":    "nashsu (CoT + 知识图谱)",
+	"llm-knowledge-base-schema.md": "llm-knowledge-base (极简3类)",
+	"paper-spec-wiki-schema.md":    "paper-spec wiki (学术7类)",
+	"paper-spec-paper-schema.md":   "paper-spec paper (论文剖面)",
 }
 
 // SeedBuiltinSchemas writes all builtin schema .md files into the workspace git repo

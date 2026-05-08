@@ -6,6 +6,7 @@
   "exports": {
     "./types": "./types/index.ts",
     "./api": "./api/index.ts",
+    "./queries": "./api/queries.ts",
     "./hooks": "./hooks/index.ts"
   },
   "dependencies": {

@@ -43,7 +43,12 @@ func newTestJobService(t *testing.T) *JobService {
 func TestCreateJob(t *testing.T) {
 	s := newTestJobService(t)
 
-	job, err := s.CreateJob("ws1", "src1", "sch1")
+	job, err := s.CreateJob(CreateJobInput{
+		WorkspaceID: "ws1",
+		AgentID:     "agent1",
+		SourcePath:  "src1",
+		SchemaID:    "sch1",
+	})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
@@ -60,14 +65,39 @@ func TestCreateJob(t *testing.T) {
 	if job.SchemaID != "sch1" {
 		t.Errorf("expected schema_id 'sch1', got '%s'", job.SchemaID)
 	}
+	if job.AgentID != "agent1" {
+		t.Errorf("expected agent_id 'agent1', got '%s'", job.AgentID)
+	}
+}
+
+func TestCreateJobWithSourcePaths(t *testing.T) {
+	s := newTestJobService(t)
+
+	job, err := s.CreateJob(CreateJobInput{
+		WorkspaceID:  "ws1",
+		AgentID:      "agent1",
+		SourcePaths:  []string{"src1", "src2"},
+		SchemaID:     "sch1",
+		InitialClaim: "daemon-seed",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	if len(job.SourcePaths) != 2 {
+		t.Fatalf("expected 2 source paths, got %d", len(job.SourcePaths))
+	}
+	if job.ClaimedBy != "daemon-seed" {
+		t.Errorf("expected claimed_by daemon-seed, got %q", job.ClaimedBy)
+	}
 }
 
 func TestClaimJob(t *testing.T) {
 	s := newTestJobService(t)
 
 	// Create two pending jobs.
-	s.CreateJob("ws1", "src1", "sch1")
-	s.CreateJob("ws1", "src2", "sch2")
+	s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
+	s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src2", SchemaID: "sch2"})
 
 	// Claim first.
 	job1, err := s.ClaimJob("ws1", "daemon-1")
@@ -124,9 +154,9 @@ func TestClaimJobNoPendingJobs(t *testing.T) {
 func TestCompleteJob(t *testing.T) {
 	s := newTestJobService(t)
 
-	job, _ := s.CreateJob("ws1", "src1", "sch1")
+	job, _ := s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
 
-	err := s.CompleteJob(job.ID, 100)
+	err := s.CompleteJob("ws1", job.ID, 100)
 	if err != nil {
 		t.Fatalf("CompleteJob: %v", err)
 	}
@@ -147,9 +177,9 @@ func TestCompleteJob(t *testing.T) {
 func TestFailJob(t *testing.T) {
 	s := newTestJobService(t)
 
-	job, _ := s.CreateJob("ws1", "src1", "sch1")
+	job, _ := s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
 
-	err := s.FailJob(job.ID, "something went wrong")
+	err := s.FailJob("ws1", job.ID, "something went wrong")
 	if err != nil {
 		t.Fatalf("FailJob: %v", err)
 	}
@@ -166,9 +196,9 @@ func TestFailJob(t *testing.T) {
 func TestUpdateJobProgress(t *testing.T) {
 	s := newTestJobService(t)
 
-	job, _ := s.CreateJob("ws1", "src1", "sch1")
+	job, _ := s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
 
-	err := s.UpdateJobProgress(job.ID, 50)
+	err := s.UpdateJobProgress("ws1", job.ID, 50)
 	if err != nil {
 		t.Fatalf("UpdateJobProgress: %v", err)
 	}
@@ -176,5 +206,28 @@ func TestUpdateJobProgress(t *testing.T) {
 	updated, _ := s.GetJob(job.ID)
 	if updated.Progress != 50 {
 		t.Errorf("expected progress 50, got %d", updated.Progress)
+	}
+}
+
+func TestListAndGetJobsAreWorkspaceScoped(t *testing.T) {
+	s := newTestJobService(t)
+	s.DB.Exec(`INSERT INTO workspaces (id, slug, name) VALUES ('ws2', 'other', 'Other')`)
+	ws1Job, _ := s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
+	s.CreateJob(CreateJobInput{WorkspaceID: "ws2", AgentID: "agent1", SourcePath: "src2", SchemaID: "sch1"})
+
+	jobs, err := s.ListJobs("ws1")
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].WorkspaceID != "ws1" {
+		t.Fatalf("expected only ws1 jobs, got %+v", jobs)
+	}
+
+	got, err := s.GetWorkspaceJob("ws1", ws1Job.ID)
+	if err != nil {
+		t.Fatalf("GetWorkspaceJob: %v", err)
+	}
+	if got.ID != ws1Job.ID {
+		t.Errorf("expected %s, got %s", ws1Job.ID, got.ID)
 	}
 }

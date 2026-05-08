@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/tethy/mulwiki/server/internal/service"
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
@@ -17,10 +20,8 @@ type DaemonClaimRequest struct {
 
 // POST /api/workspaces/{slug}/jobs/claim — daemon claims next pending job
 func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
-
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
@@ -36,60 +37,14 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pick the oldest pending job in this workspace and atomically claim it.
-	tx, err := h.DB.Begin()
+	j, err := service.NewJobService(h.DB).ClaimJob(workspaceID, req.DaemonID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
+		writeError(w, http.StatusInternalServerError, "failed to claim job")
 		return
 	}
-	defer tx.Rollback()
-
-	var jobID string
-	err = tx.QueryRow(
-		`SELECT id FROM jobs WHERE workspace_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1`,
-		workspaceID,
-	).Scan(&jobID)
-	if err != nil {
-		// No pending jobs.
+	if j == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = tx.Exec(
-		`UPDATE jobs SET status = 'running', claimed_by = ? WHERE id = ? AND status = 'pending'`,
-		req.DaemonID, jobID,
-	)
-	if err != nil {
-		// Someone else claimed it first.
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to commit")
-		return
-	}
-
-	// Return the claimed job.
-	var j protocol.Job
-	var completedAt *string
-	var sourcePathsRaw string
-	err = h.DB.QueryRow(
-		`SELECT id, workspace_id, status, agent_id, source_path, source_paths, schema_id, progress, error,
-		        claimed_by, created_at, completed_at
-		 FROM jobs WHERE id = ?`, jobID,
-	).Scan(&j.ID, &j.WorkspaceID, &j.Status, &j.AgentID,
-		&j.SourcePath, &sourcePathsRaw, &j.SchemaID, &j.Progress, &j.Error, &j.ClaimedBy, &now, &completedAt)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to fetch job")
-		return
-	}
-	j.CreatedAt = now
-	j.CompletedAt = completedAt
-	json.Unmarshal([]byte(sourcePathsRaw), &j.SourcePaths)
-	if j.SourcePaths == nil {
-		j.SourcePaths = []string{}
 	}
 
 	writeJSON(w, http.StatusOK, j)
@@ -97,11 +52,10 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/jobs/{id}/progress — daemon updates job progress
 func (h *Handler) UpdateJobProgress(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
@@ -114,11 +68,11 @@ func (h *Handler) UpdateJobProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := h.DB.Exec(
-		`UPDATE jobs SET progress = ? WHERE id = ? AND workspace_id = ?`,
-		body.Progress, id, workspaceID,
-	)
-	if err != nil {
+	if err := service.NewJobService(h.DB).UpdateJobProgress(workspaceID, id, body.Progress); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to update progress")
 		return
 	}
@@ -128,21 +82,19 @@ func (h *Handler) UpdateJobProgress(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/jobs/{id}/complete — daemon marks job complete
 func (h *Handler) CompleteJob(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := h.DB.Exec(
-		`UPDATE jobs SET status = 'completed', progress = 100, completed_at = ? WHERE id = ? AND workspace_id = ?`,
-		now, id, workspaceID,
-	)
-	if err != nil {
+	if err := service.NewJobService(h.DB).CompleteJob(workspaceID, id, 100); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to complete job")
 		return
 	}
@@ -152,11 +104,10 @@ func (h *Handler) CompleteJob(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/jobs/{id}/fail — daemon marks job failed
 func (h *Handler) FailJob(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
@@ -169,12 +120,11 @@ func (h *Handler) FailJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := h.DB.Exec(
-		`UPDATE jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ? AND workspace_id = ?`,
-		body.Error, now, id, workspaceID,
-	)
-	if err != nil {
+	if err := service.NewJobService(h.DB).FailJob(workspaceID, id, body.Error); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to fail job")
 		return
 	}
@@ -184,41 +134,16 @@ func (h *Handler) FailJob(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/workspaces/{slug}/jobs — list jobs
 func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
-
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 
-	rows, err := h.DB.Query(
-		`SELECT id, workspace_id, status, agent_id, source_path, source_paths, schema_id, progress, error,
-		        claimed_by, created_at, completed_at
-		 FROM jobs WHERE workspace_id = ? ORDER BY created_at DESC`, workspaceID,
-	)
+	jobs, err := service.NewJobService(h.DB).ListJobs(workspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list jobs")
 		return
-	}
-	defer rows.Close()
-
-	jobs := make([]protocol.Job, 0)
-	for rows.Next() {
-		var j protocol.Job
-		var completedAt *string
-		var sourcePathsRaw string
-		if err := rows.Scan(&j.ID, &j.WorkspaceID, &j.Status, &j.AgentID,
-			&j.SourcePath, &sourcePathsRaw, &j.SchemaID, &j.Progress, &j.Error, &j.ClaimedBy, &j.CreatedAt, &completedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to scan job")
-			return
-		}
-		j.CompletedAt = completedAt
-		json.Unmarshal([]byte(sourcePathsRaw), &j.SourcePaths)
-		if j.SourcePaths == nil {
-			j.SourcePaths = []string{}
-		}
-		jobs = append(jobs, j)
 	}
 
 	writeJSON(w, http.StatusOK, jobs)
@@ -226,10 +151,8 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/jobs — create a new job
 func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
-
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
@@ -245,32 +168,17 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	sourcePathsJSON, _ := json.Marshal(req.SourcePaths)
-	if string(sourcePathsJSON) == "null" {
-		sourcePathsJSON = []byte("[]")
-	}
-
-	var j protocol.Job
-	var completedAt *string
-	var sourcePathsRaw string
-	err := h.DB.QueryRow(
-		`INSERT INTO jobs (workspace_id, status, agent_id, source_path, source_paths, schema_id, claimed_by, created_at)
-		 VALUES (?, 'pending', ?, ?, ?, ?, ?, ?)
-		 RETURNING id, workspace_id, status, agent_id, source_path, source_paths, schema_id, progress, error,
-		           claimed_by, created_at, completed_at`,
-		workspaceID, req.AgentID, req.SourcePath, string(sourcePathsJSON), req.SchemaID, req.ClaimedBy, now,
-	).Scan(&j.ID, &j.WorkspaceID, &j.Status, &j.AgentID,
-		&j.SourcePath, &sourcePathsRaw, &j.SchemaID, &j.Progress, &j.Error, &j.ClaimedBy, &j.CreatedAt, &completedAt)
+	j, err := service.NewJobService(h.DB).CreateJob(service.CreateJobInput{
+		WorkspaceID:  workspaceID,
+		AgentID:      req.AgentID,
+		SourcePath:   req.SourcePath,
+		SourcePaths:  req.SourcePaths,
+		SchemaID:     req.SchemaID,
+		InitialClaim: req.ClaimedBy,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create job: %v", err))
 		return
-	}
-	j.CompletedAt = completedAt
-	json.Unmarshal([]byte(sourcePathsRaw), &j.SourcePaths)
-	if j.SourcePaths == nil {
-		j.SourcePaths = []string{}
 	}
 
 	writeJSON(w, http.StatusCreated, j)
@@ -278,32 +186,18 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/workspaces/{slug}/jobs/{id} — get job status
 func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 
-	var j protocol.Job
-	var completedAt *string
-	var sourcePathsRaw string
-	err := h.DB.QueryRow(
-		`SELECT id, workspace_id, status, agent_id, source_path, source_paths, schema_id, progress, error,
-		        claimed_by, created_at, completed_at
-		 FROM jobs WHERE id = ? AND workspace_id = ?`, id, workspaceID,
-	).Scan(&j.ID, &j.WorkspaceID, &j.Status, &j.AgentID,
-		&j.SourcePath, &sourcePathsRaw, &j.SchemaID, &j.Progress, &j.Error, &j.ClaimedBy, &j.CreatedAt, &completedAt)
+	j, err := service.NewJobService(h.DB).GetWorkspaceJob(workspaceID, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "job not found")
 		return
-	}
-	j.CompletedAt = completedAt
-	json.Unmarshal([]byte(sourcePathsRaw), &j.SourcePaths)
-	if j.SourcePaths == nil {
-		j.SourcePaths = []string{}
 	}
 
 	writeJSON(w, http.StatusOK, j)

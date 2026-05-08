@@ -44,6 +44,8 @@ func CleanSlug(raw string) string {
 
 // POST /api/workspaces
 func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
+	currentUserID := userID(r)
+
 	var req protocol.CreateWorkspaceRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -81,6 +83,18 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if currentUserID != "" {
+		if _, err := h.DB.Exec(
+			`INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'owner')`,
+			ws.ID, currentUserID,
+		); err != nil {
+			slog.Error("failed to create workspace owner membership", "slug", slug, "user_id", currentUserID, "error", err)
+			h.DB.Exec(`DELETE FROM workspaces WHERE id = ?`, ws.ID)
+			writeError(w, http.StatusInternalServerError, "failed to create workspace membership")
+			return
+		}
+	}
+
 	// Init bare git repo for workspace storage.
 	repoPath := filepath.Join(h.reposDir(), ws.ID+".git")
 	repo, err := gitrepo.InitBare(repoPath)
@@ -110,7 +124,19 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/workspaces
 func (h *Handler) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.DB.Query(`SELECT id, slug, name, description, created_at FROM workspaces WHERE slug <> 'builtin' ORDER BY created_at DESC`)
+	currentUserID := userID(r)
+	query := `SELECT id, slug, name, description, created_at FROM workspaces WHERE slug <> 'builtin' ORDER BY created_at DESC`
+	args := []any{}
+	if currentUserID != "" {
+		query = `SELECT w.id, w.slug, w.name, w.description, w.created_at
+		 FROM workspaces w
+		 JOIN workspace_members wm ON wm.workspace_id = w.id
+		 WHERE wm.user_id = ? AND w.slug <> 'builtin'
+		 ORDER BY w.created_at DESC`
+		args = append(args, currentUserID)
+	}
+
+	rows, err := h.DB.Query(query, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list workspaces")
 		return

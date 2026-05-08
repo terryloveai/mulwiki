@@ -3,6 +3,7 @@ package handler
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -70,7 +71,7 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 		a.Skills = make([]protocol.AgentSkill, 0)
 
 		// Redact custom_env for non-owners
-		if a.OwnerID != "" && a.OwnerID != currentUser {
+		if a.OwnerID != "" && a.OwnerID != currentUser && !isDaemonRequest(r) {
 			a.CustomEnv = nil
 		}
 
@@ -275,7 +276,7 @@ func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Redact custom_env for non-owners
-	if a.OwnerID != "" && a.OwnerID != currentUser {
+	if a.OwnerID != "" && a.OwnerID != currentUser && !isDaemonRequest(r) {
 		a.CustomEnv = nil
 	}
 
@@ -633,6 +634,12 @@ func (h *Handler) GetAgentTask(w http.ResponseWriter, r *http.Request) {
 	if parentTaskID.Valid {
 		t.ParentTaskID = &parentTaskID.String
 	}
+	messages, err := h.loadAgentTaskMessages(t.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load task messages")
+		return
+	}
+	t.Messages = messages
 
 	writeJSON(w, http.StatusOK, map[string]any{"task": t})
 }
@@ -653,19 +660,23 @@ func (h *Handler) CreateAgentTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		SourcePath     string `json:"source_path"`
-		SchemaID     string `json:"schema_id"`
-		RuntimeID    string `json:"runtime_id"`
-		Priority     int    `json:"priority"`
-		MaxAttempts  int    `json:"max_attempts"`
-		ParentTaskID string `json:"parent_task_id"`
-		SessionID    string `json:"session_id"`
-		WorkDir      string `json:"work_dir"`
-		DaemonID     string `json:"daemon_id"`
+		SourcePath   string                           `json:"source_path"`
+		SchemaID     string                           `json:"schema_id"`
+		RuntimeID    string                           `json:"runtime_id"`
+		Priority     int                              `json:"priority"`
+		MaxAttempts  int                              `json:"max_attempts"`
+		ParentTaskID string                           `json:"parent_task_id"`
+		SessionID    string                           `json:"session_id"`
+		WorkDir      string                           `json:"work_dir"`
+		DaemonID     string                           `json:"daemon_id"`
+		Messages     []protocol.AgentTaskMessageInput `json:"messages"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+	if req.DaemonID == "" {
+		req.DaemonID = daemonID(r)
 	}
 
 	if req.MaxAttempts <= 0 {
@@ -715,6 +726,16 @@ func (h *Handler) CreateAgentTask(w http.ResponseWriter, r *http.Request) {
 	if parentTaskID.Valid {
 		t.ParentTaskID = &parentTaskID.String
 	}
+	if err := h.insertAgentTaskMessages(workspaceID, id, t.ID, req.Messages); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	messages, err := h.loadAgentTaskMessages(t.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load task messages")
+		return
+	}
+	t.Messages = messages
 
 	// Publish event if bus is wired.
 	if h.EventBus != nil {
@@ -748,19 +769,23 @@ func (h *Handler) UpdateAgentTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Status        string `json:"status"`
-		Result        string `json:"result"`
-		Error         string `json:"error"`
-		Attempt       int    `json:"attempt"`
-		ParentTaskID  string `json:"parent_task_id"`
-		SessionID     string `json:"session_id"`
-		WorkDir       string `json:"work_dir"`
-		FailureReason string `json:"failure_reason"`
-		DaemonID      string `json:"daemon_id"`
+		Status        string                           `json:"status"`
+		Result        string                           `json:"result"`
+		Error         string                           `json:"error"`
+		Attempt       int                              `json:"attempt"`
+		ParentTaskID  string                           `json:"parent_task_id"`
+		SessionID     string                           `json:"session_id"`
+		WorkDir       string                           `json:"work_dir"`
+		FailureReason string                           `json:"failure_reason"`
+		DaemonID      string                           `json:"daemon_id"`
+		Messages      []protocol.AgentTaskMessageInput `json:"messages"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+	if req.DaemonID == "" {
+		req.DaemonID = daemonID(r)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -817,17 +842,19 @@ func (h *Handler) UpdateAgentTask(w http.ResponseWriter, r *http.Request) {
 		args = append(args, req.DaemonID)
 	}
 
-	if len(setClauses) == 0 {
+	if len(setClauses) == 0 && len(req.Messages) == 0 {
 		writeError(w, http.StatusBadRequest, "no fields to update")
 		return
 	}
 
-	args = append(args, taskID)
-	query := `UPDATE agent_tasks SET ` + strings.Join(setClauses, ", ") + ` WHERE id = ?`
+	if len(setClauses) > 0 {
+		args = append(args, taskID)
+		query := `UPDATE agent_tasks SET ` + strings.Join(setClauses, ", ") + ` WHERE id = ?`
 
-	if _, err := h.DB.Exec(query, args...); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update task")
-		return
+		if _, err := h.DB.Exec(query, args...); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update task")
+			return
+		}
 	}
 
 	// Return updated task
@@ -865,6 +892,16 @@ func (h *Handler) UpdateAgentTask(w http.ResponseWriter, r *http.Request) {
 	if parentTaskID.Valid {
 		t.ParentTaskID = &parentTaskID.String
 	}
+	if err := h.insertAgentTaskMessages(workspaceID, id, t.ID, req.Messages); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	messages, err := h.loadAgentTaskMessages(t.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load task messages")
+		return
+	}
+	t.Messages = messages
 
 	// Publish event based on status transition.
 	if h.EventBus != nil && req.Status != "" {
@@ -890,6 +927,62 @@ func (h *Handler) UpdateAgentTask(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{"task": t})
 }
+
+func (h *Handler) insertAgentTaskMessages(workspaceID, agentID, taskID string, messages []protocol.AgentTaskMessageInput) error {
+	for _, msg := range messages {
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+		role := strings.TrimSpace(msg.Role)
+		if role == "" {
+			role = "daemon"
+		}
+		metadata := msg.Metadata
+		if len(metadata) == 0 || string(metadata) == "null" {
+			metadata = json.RawMessage(`{}`)
+		}
+		if !json.Valid(metadata) {
+			return errInvalidTaskMessageMetadata
+		}
+		if _, err := h.DB.Exec(
+			`INSERT INTO agent_task_messages (task_id, workspace_id, agent_id, role, content, metadata)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			taskID, workspaceID, agentID, role, content, string(metadata),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Handler) loadAgentTaskMessages(taskID string) ([]protocol.AgentTaskMessage, error) {
+	rows, err := h.DB.Query(
+		`SELECT id, task_id, workspace_id, agent_id, role, content, metadata, created_at
+		 FROM agent_task_messages
+		 WHERE task_id = ?
+		 ORDER BY created_at ASC, id ASC`,
+		taskID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	messages := make([]protocol.AgentTaskMessage, 0)
+	for rows.Next() {
+		var msg protocol.AgentTaskMessage
+		var metadata string
+		if err := rows.Scan(&msg.ID, &msg.TaskID, &msg.WorkspaceID, &msg.AgentID, &msg.Role, &msg.Content, &metadata, &msg.CreatedAt); err != nil {
+			return nil, err
+		}
+		msg.Metadata = json.RawMessage(metadata)
+		messages = append(messages, msg)
+	}
+	return messages, rows.Err()
+}
+
+var errInvalidTaskMessageMetadata = errors.New("invalid task message metadata")
 
 // ClaimAgentTaskRequest is the request body for claiming a task via the new atomic claim endpoint.
 type ClaimAgentTaskRequest struct {

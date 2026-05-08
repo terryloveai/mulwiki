@@ -238,5 +238,3 @@ func (h *Handler) RemoveAgentSkill(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusNoContent, nil)
 }
-
-

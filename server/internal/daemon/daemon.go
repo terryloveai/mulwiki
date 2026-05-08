@@ -38,8 +38,8 @@ type Daemon struct {
 	RepoURL       string // direct repo URL for the configured workspace
 	HealthPort    int    // port for health HTTP server (0 = disabled)
 
-	Agents      map[string]AgentEntry // provider → executable (populated from detected runtimes)
-	AgentTimeout time.Duration        // per-job timeout (default: 30 min)
+	Agents       map[string]AgentEntry // provider → executable (populated from detected runtimes)
+	AgentTimeout time.Duration         // per-job timeout (default: 30 min)
 
 	agentVersions   map[string]string
 	agentVersionsMu sync.RWMutex
@@ -53,8 +53,8 @@ type Config struct {
 	ServerURL     string
 	WorkspaceSlug string
 	WorkDir       string
-	ReposURL      string // e.g. "http://localhost:8080/repos" or "/data/repos" for local
-	HealthPort    int    // port for health HTTP server (0 = disabled)
+	ReposURL      string        // e.g. "http://localhost:8080/repos" or "/data/repos" for local
+	HealthPort    int           // port for health HTTP server (0 = disabled)
 	AgentTimeout  time.Duration // per-job timeout (default: 30 min)
 }
 
@@ -158,10 +158,10 @@ func (d *Daemon) serveHealth(ctx context.Context) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]any{
-			"status":  "running",
-			"pid":     os.Getpid(),
-			"version": "0.1.0",
-			"uptime":  time.Since(d.startTime).Truncate(time.Second).String(),
+			"status":     "running",
+			"pid":        os.Getpid(),
+			"version":    "0.1.0",
+			"uptime":     time.Since(d.startTime).Truncate(time.Second).String(),
 			"workspaces": []string{d.WorkspaceSlug},
 		}
 		runtimes := make([]map[string]any, 0, len(d.detected))
@@ -287,7 +287,7 @@ func (d *Daemon) register(runtimes []protocol.RuntimeInfo) error {
 	}
 
 	url := fmt.Sprintf("%s/api/daemon/register", d.ServerURL)
-	resp, err := d.HTTPClient.Post(url, "application/json", bytes.NewReader(jsonBody))
+	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return fmt.Errorf("http post register: %w", err)
 	}
@@ -312,6 +312,37 @@ func (d *Daemon) register(runtimes []protocol.RuntimeInfo) error {
 	return nil
 }
 
+func (d *Daemon) postJSON(url string, body io.Reader) (*http.Response, error) {
+	req, err := d.newDaemonRequest(http.MethodPost, url, body)
+	if err != nil {
+		return nil, err
+	}
+	return d.HTTPClient.Do(req)
+}
+
+func (d *Daemon) newDaemonRequest(method, url string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("X-Daemon-ID", d.DaemonID)
+	if token := os.Getenv("DAEMON_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return req, nil
+}
+
+func (d *Daemon) getDaemonJSON(url string) (*http.Response, error) {
+	req, err := d.newDaemonRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return d.HTTPClient.Do(req)
+}
+
 // heartbeatLoop sends periodic heartbeats to the server every 30 seconds.
 func (d *Daemon) heartbeatLoop(runtimes []protocol.RuntimeInfo) {
 	hostname, _ := os.Hostname()
@@ -327,7 +358,7 @@ func (d *Daemon) heartbeatLoop(runtimes []protocol.RuntimeInfo) {
 		}
 		jsonBody, _ := json.Marshal(req)
 		url := fmt.Sprintf("%s/api/daemon/heartbeat", d.ServerURL)
-		resp, err := d.HTTPClient.Post(url, "application/json", bytes.NewReader(jsonBody))
+		resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
 		if err != nil {
 			slog.Debug("heartbeat failed", "error", err, "hostname", hostname)
 			return
@@ -358,7 +389,7 @@ func (d *Daemon) claimNextJob() (*protocol.Job, error) {
 		return nil, fmt.Errorf("marshal body: %w", err)
 	}
 
-	resp, err := d.HTTPClient.Post(url, "application/json", bytes.NewReader(jsonBody))
+	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("http post: %w", err)
 	}
@@ -491,7 +522,7 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 	d.updateProgress(job.ID, 15)
 
 	// Mark task as started.
-	d.markTaskStarted(agentCfg.ID, task.ID)
+	d.markTaskStarted(agentCfg.ID, task.ID, workdir)
 	d.updateProgress(job.ID, 20)
 
 	// Build agent environment.
@@ -573,6 +604,7 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 			slog.Debug("agent message", "job_id", job.ID, "type", msg.Type, "content", msg.Content[:min(len(msg.Content), 200)])
 			// Also stream to server as a log line for real-time SSE.
 			d.postLogLine(job.ID, string(msg.Type), msg.Content)
+			d.appendTaskMessage(agentCfg.ID, task.ID, msg)
 		}
 	}()
 
@@ -598,7 +630,7 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 			return
 		}
 
-		d.markTaskCompleted(agentCfg.ID, task.ID, outputStr)
+		d.markTaskCompleted(agentCfg.ID, task.ID, outputStr, result.SessionID)
 		task.Status = "completed"
 		d.updateProgress(job.ID, 100)
 		d.completeJob(job.ID)
@@ -612,7 +644,7 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 		}
 		slog.Error("agent process failed", "job_id", job.ID, "task_id", task.ID, "attempt", attempt,
 			"status", result.Status, "error", result.Error)
-		d.markTaskFailed(agentCfg.ID, task.ID, attempt, errMsg)
+		d.markTaskFailed(agentCfg.ID, task.ID, attempt, errMsg, result.SessionID)
 		task.Status = "failed"
 
 	default:
@@ -668,8 +700,8 @@ func (d *Daemon) buildPrompt(job protocol.Job, agentCfg *protocol.Agent) string 
 
 // fetchAgent retrieves an agent's full configuration from the server.
 func (d *Daemon) fetchAgent(agentID string) (*protocol.Agent, error) {
-	url := fmt.Sprintf("%s/api/workspaces/%s/agents/%s", d.ServerURL, d.WorkspaceSlug, agentID)
-	resp, err := d.HTTPClient.Get(url)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s", d.ServerURL, d.WorkspaceSlug, agentID)
+	resp, err := d.getDaemonJSON(url)
 	if err != nil {
 		return nil, fmt.Errorf("http get agent: %w", err)
 	}
@@ -690,8 +722,8 @@ func (d *Daemon) fetchAgent(agentID string) (*protocol.Agent, error) {
 
 // fetchRuntime retrieves a runtime's configuration from the server.
 func (d *Daemon) fetchRuntime(runtimeID string) (*protocol.AgentRuntime, error) {
-	url := fmt.Sprintf("%s/api/workspaces/%s/agents/runtimes/%s", d.ServerURL, d.WorkspaceSlug, runtimeID)
-	resp, err := d.HTTPClient.Get(url)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/runtimes/%s", d.ServerURL, d.WorkspaceSlug, runtimeID)
+	resp, err := d.getDaemonJSON(url)
 	if err != nil {
 		return nil, fmt.Errorf("http get runtime: %w", err)
 	}
@@ -712,8 +744,8 @@ func (d *Daemon) fetchRuntime(runtimeID string) (*protocol.AgentRuntime, error) 
 
 // fetchSchema retrieves schema configuration from the server.
 func (d *Daemon) fetchSchema(schemaID string) (*protocol.Schema, error) {
-	url := fmt.Sprintf("%s/api/workspaces/%s/schemas/%s", d.ServerURL, d.WorkspaceSlug, schemaID)
-	resp, err := d.HTTPClient.Get(url)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/schemas/%s", d.ServerURL, d.WorkspaceSlug, schemaID)
+	resp, err := d.getDaemonJSON(url)
 	if err != nil {
 		return nil, fmt.Errorf("http get schema: %w", err)
 	}
@@ -800,21 +832,33 @@ func (d *Daemon) buildAgentsMD(agent *protocol.Agent, job protocol.Job) string {
 
 // createTask creates an agent_tasks record via the server API.
 func (d *Daemon) createTask(job protocol.Job, agent *protocol.Agent, runtime *protocol.AgentRuntime) (*protocol.AgentTask, error) {
-	url := fmt.Sprintf("%s/api/workspaces/%s/agents/%s/tasks", d.ServerURL, d.WorkspaceSlug, agent.ID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s/tasks", d.ServerURL, d.WorkspaceSlug, agent.ID)
 
 	body := map[string]interface{}{
-		"source_path":    job.SourcePath,
+		"source_path":  job.SourcePath,
 		"schema_id":    job.SchemaID,
 		"runtime_id":   runtime.ID,
 		"priority":     0,
 		"max_attempts": 3,
+		"daemon_id":    d.DaemonID,
+		"messages": []map[string]interface{}{
+			{
+				"role":    "daemon",
+				"content": "task queued",
+				"metadata": map[string]interface{}{
+					"job_id":     job.ID,
+					"agent_id":   agent.ID,
+					"runtime_id": runtime.ID,
+				},
+			},
+		},
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal task body: %w", err)
 	}
 
-	resp, err := d.HTTPClient.Post(url, "application/json", bytes.NewReader(jsonBody))
+	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("http post create task: %w", err)
 	}
@@ -827,7 +871,9 @@ func (d *Daemon) createTask(job protocol.Job, agent *protocol.Agent, runtime *pr
 	}
 
 	if resp.StatusCode != http.StatusCreated {
-		var errBody struct{ Error string `json:"error"` }
+		var errBody struct {
+			Error string `json:"error"`
+		}
 		json.Unmarshal(bodyBytes, &errBody)
 		return nil, fmt.Errorf("create task returned status %d: %s", resp.StatusCode, errBody.Error)
 	}
@@ -842,9 +888,31 @@ func (d *Daemon) createTask(job protocol.Job, agent *protocol.Agent, runtime *pr
 }
 
 // updateTask sends a PATCH to update the task's status/result/error.
-func (d *Daemon) updateTask(agentID, taskID string, status, result, errMsg string, attempt int) error {
-	url := fmt.Sprintf("%s/api/workspaces/%s/agents/%s/tasks/%s", d.ServerURL, d.WorkspaceSlug, agentID, taskID)
+func (d *Daemon) patchTask(agentID, taskID string, body map[string]interface{}) error {
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s/tasks/%s", d.ServerURL, d.WorkspaceSlug, agentID, taskID)
 
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal update task: %w", err)
+	}
+
+	req, err := d.newDaemonRequest(http.MethodPatch, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+	resp, err := d.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("http patch task: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("update task returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (d *Daemon) updateTask(agentID, taskID string, status, result, errMsg string, attempt int, sessionID, workDir string) error {
 	body := map[string]interface{}{}
 	if status != "" {
 		body["status"] = status
@@ -858,47 +926,103 @@ func (d *Daemon) updateTask(agentID, taskID string, status, result, errMsg strin
 	if attempt > 0 {
 		body["attempt"] = attempt
 	}
-
-	jsonBody, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshal update task: %w", err)
+	if sessionID != "" {
+		body["session_id"] = sessionID
+	}
+	if workDir != "" {
+		body["work_dir"] = workDir
 	}
 
-	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(jsonBody))
-	if err != nil {
-		return fmt.Errorf("new request: %w", err)
+	if msg := taskStatusMessage(status, result, errMsg); msg != "" {
+		body["messages"] = []map[string]interface{}{
+			{
+				"role":    "daemon",
+				"content": msg,
+				"metadata": map[string]interface{}{
+					"status":     status,
+					"attempt":    attempt,
+					"session_id": sessionID,
+					"work_dir":   workDir,
+				},
+			},
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := d.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("http patch task: %w", err)
-	}
-	defer resp.Body.Close()
+	return d.patchTask(agentID, taskID, body)
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("update task returned status %d", resp.StatusCode)
+func taskStatusMessage(status, result, errMsg string) string {
+	switch {
+	case errMsg != "":
+		return errMsg
+	case result != "":
+		return result
+	case status != "":
+		return "task " + status
+	default:
+		return ""
 	}
-	return nil
+}
+
+func (d *Daemon) appendTaskMessage(agentID, taskID string, msg agent.Message) {
+	content := strings.TrimSpace(msg.Content)
+	if content == "" {
+		content = strings.TrimSpace(msg.Status)
+	}
+	if content == "" && msg.Tool != "" {
+		content = msg.Tool
+	}
+	if content == "" {
+		return
+	}
+
+	body := map[string]interface{}{
+		"messages": []map[string]interface{}{
+			{
+				"role":    "agent",
+				"content": content,
+				"metadata": map[string]interface{}{
+					"type":       string(msg.Type),
+					"tool":       msg.Tool,
+					"call_id":    msg.CallID,
+					"input":      msg.Input,
+					"output":     msg.Output,
+					"status":     msg.Status,
+					"level":      msg.Level,
+					"session_id": msg.SessionID,
+				},
+			},
+		},
+	}
+	if msg.SessionID != "" {
+		body["session_id"] = msg.SessionID
+	}
+	if err := d.patchTask(agentID, taskID, body); err != nil {
+		slog.Debug("append task message failed", "task_id", taskID, "error", err)
+	}
 }
 
 // markTaskRunning marks the task as "running" (valid per DB CHECK constraint).
-func (d *Daemon) markTaskStarted(agentID, taskID string) {
-	if err := d.updateTask(agentID, taskID, "running", "", "", 0); err != nil {
+func (d *Daemon) markTaskStarted(agentID, taskID, workDir string) {
+	if err := d.updateTask(agentID, taskID, "running", "", "", 0, "", workDir); err != nil {
 		slog.Error("mark task started failed", "task_id", taskID, "error", err)
 	}
 }
 
 // markTaskCompleted marks the task as "completed" with a result summary.
-func (d *Daemon) markTaskCompleted(agentID, taskID, result string) {
-	if err := d.updateTask(agentID, taskID, "completed", result, "", 0); err != nil {
+func (d *Daemon) markTaskCompleted(agentID, taskID, result, sessionID string) {
+	if err := d.updateTask(agentID, taskID, "completed", result, "", 0, sessionID, ""); err != nil {
 		slog.Error("mark task completed failed", "task_id", taskID, "error", err)
 	}
 }
 
 // markTaskFailed marks the task as "failed" with an error message.
-func (d *Daemon) markTaskFailed(agentID, taskID string, attempt int, errMsg string) {
-	if err := d.updateTask(agentID, taskID, "failed", "", errMsg, attempt); err != nil {
+func (d *Daemon) markTaskFailed(agentID, taskID string, attempt int, errMsg string, sessionID ...string) {
+	resumeID := ""
+	if len(sessionID) > 0 {
+		resumeID = sessionID[0]
+	}
+	if err := d.updateTask(agentID, taskID, "failed", "", errMsg, attempt, resumeID, ""); err != nil {
 		slog.Error("mark task failed failed", "task_id", taskID, "error", err)
 	}
 }
@@ -980,8 +1104,8 @@ func (d *Daemon) buildWorkdir(job protocol.Job, agent *protocol.Agent) (string, 
 
 // fetchWorkspace retrieves workspace metadata.
 func (d *Daemon) fetchWorkspace() (*protocol.Workspace, error) {
-	url := fmt.Sprintf("%s/api/workspaces/%s", d.ServerURL, d.WorkspaceSlug)
-	resp, err := d.HTTPClient.Get(url)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s", d.ServerURL, d.WorkspaceSlug)
+	resp, err := d.getDaemonJSON(url)
 	if err != nil {
 		return nil, fmt.Errorf("http get workspace: %w", err)
 	}
@@ -1117,13 +1241,13 @@ func (d *Daemon) collectOutput(workdir string, job protocol.Job, _ *protocol.Age
 	}
 
 	payload := struct {
-		JobID string     `json:"job_id"`
-		Pages []pageOut  `json:"pages"`
+		JobID string    `json:"job_id"`
+		Pages []pageOut `json:"pages"`
 	}{job.ID, pages}
 
 	body, _ := json.Marshal(payload)
 	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/%s/output", d.ServerURL, d.WorkspaceSlug, job.ID)
-	resp, err := d.HTTPClient.Post(url, "application/json", bytes.NewReader(body))
+	resp, err := d.postJSON(url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("deliver output: %w", err)
 	}
@@ -1210,7 +1334,7 @@ func (d *Daemon) postLogLine(jobID, stream, line string) {
 		"line":   line,
 	}
 	jsonBody, _ := json.Marshal(body)
-	resp, err := d.HTTPClient.Post(url, "application/json", bytes.NewReader(jsonBody))
+	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
 	if err != nil {
 		slog.Debug("post log line failed", "error", err)
 		return
@@ -1227,7 +1351,7 @@ func (d *Daemon) updateProgress(jobID string, progress int) {
 	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/%s/progress", d.ServerURL, d.WorkspaceSlug, jobID)
 	body := map[string]int{"progress": progress}
 	jsonBody, _ := json.Marshal(body)
-	resp, err := d.HTTPClient.Post(url, "application/json", bytes.NewReader(jsonBody))
+	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
 	if err != nil {
 		slog.Error("update progress failed", "job_id", jobID, "error", err)
 		return
@@ -1238,7 +1362,7 @@ func (d *Daemon) updateProgress(jobID string, progress int) {
 // completeJob marks the job as completed on the server.
 func (d *Daemon) completeJob(jobID string) {
 	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/%s/complete", d.ServerURL, d.WorkspaceSlug, jobID)
-	resp, err := d.HTTPClient.Post(url, "application/json", nil)
+	resp, err := d.postJSON(url, nil)
 	if err != nil {
 		slog.Error("complete job failed", "job_id", jobID, "error", err)
 		return
@@ -1252,7 +1376,7 @@ func (d *Daemon) failJob(jobID, errMsg string) {
 	url := fmt.Sprintf("%s/api/workspaces/%s/jobs/%s/fail", d.ServerURL, d.WorkspaceSlug, jobID)
 	body := map[string]string{"error": errMsg}
 	jsonBody, _ := json.Marshal(body)
-	resp, err := d.HTTPClient.Post(url, "application/json", bytes.NewReader(jsonBody))
+	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
 	if err != nil {
 		slog.Error("fail job failed", "job_id", jobID, "error", err)
 		return

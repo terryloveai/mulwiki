@@ -28,7 +28,9 @@ func TestCreateAgent(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var wrap struct { Agent protocol.Agent `json:"agent"` }
+	var wrap struct {
+		Agent protocol.Agent `json:"agent"`
+	}
 	if err := json.NewDecoder(rr.Body).Decode(&wrap); err != nil {
 		t.Fatalf("decode agent: %v", err)
 	}
@@ -74,7 +76,9 @@ func TestCreateAgentWithRuntime(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var wrap struct { Agent protocol.Agent `json:"agent"` }
+	var wrap struct {
+		Agent protocol.Agent `json:"agent"`
+	}
 	json.NewDecoder(rr.Body).Decode(&wrap)
 	a := wrap.Agent
 
@@ -158,7 +162,9 @@ func TestGetAgent(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var wrap struct { Agent protocol.Agent `json:"agent"` }
+	var wrap struct {
+		Agent protocol.Agent `json:"agent"`
+	}
 	json.NewDecoder(rr.Body).Decode(&wrap)
 	a := wrap.Agent
 
@@ -198,7 +204,9 @@ func TestUpdateAgent(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var wrap struct { Agent protocol.Agent `json:"agent"` }
+	var wrap struct {
+		Agent protocol.Agent `json:"agent"`
+	}
 	json.NewDecoder(rr.Body).Decode(&wrap)
 	a := wrap.Agent
 
@@ -265,8 +273,11 @@ func TestCreateSkill(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var wrap struct { Skill protocol.AgentSkill `json:"skill"` }
-	json.NewDecoder(rr.Body).Decode(&wrap); sk := wrap.Skill
+	var wrap struct {
+		Skill protocol.AgentSkill `json:"skill"`
+	}
+	json.NewDecoder(rr.Body).Decode(&wrap)
+	sk := wrap.Skill
 	if sk.Name != "PDF Parser" {
 		t.Errorf("expected name 'PDF Parser', got '%s'", sk.Name)
 	}
@@ -293,7 +304,9 @@ func TestAddAgentSkill(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	h.GetAgent(rr2, req2)
 
-	var wrap struct { Agent protocol.Agent `json:"agent"` }
+	var wrap struct {
+		Agent protocol.Agent `json:"agent"`
+	}
 	json.NewDecoder(rr2.Body).Decode(&wrap)
 	a := wrap.Agent
 
@@ -325,7 +338,9 @@ func TestRemoveAgentSkill(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	h.GetAgent(rr2, req2)
 
-	var wrap struct { Agent protocol.Agent `json:"agent"` }
+	var wrap struct {
+		Agent protocol.Agent `json:"agent"`
+	}
 	json.NewDecoder(rr2.Body).Decode(&wrap)
 	a := wrap.Agent
 	if len(a.Skills) != 0 {
@@ -351,8 +366,11 @@ func TestCreateRuntime(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var wrap struct { Runtime protocol.AgentRuntime `json:"runtime"` }
-	json.NewDecoder(rr.Body).Decode(&wrap); rt := wrap.Runtime
+	var wrap struct {
+		Runtime protocol.AgentRuntime `json:"runtime"`
+	}
+	json.NewDecoder(rr.Body).Decode(&wrap)
+	rt := wrap.Runtime
 
 	if rt.Name != "Claude Code" {
 		t.Errorf("expected name 'Claude Code', got '%s'", rt.Name)
@@ -419,8 +437,11 @@ func TestCreateAgentTask(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var wrap struct { Task protocol.AgentTask `json:"task"` }
-	json.NewDecoder(rr.Body).Decode(&wrap); task := wrap.Task
+	var wrap struct {
+		Task protocol.AgentTask `json:"task"`
+	}
+	json.NewDecoder(rr.Body).Decode(&wrap)
+	task := wrap.Task
 
 	if task.Status != "queued" {
 		t.Errorf("expected status 'queued', got '%s'", task.Status)
@@ -450,14 +471,50 @@ func TestUpdateAgentTask(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var wrap struct { Task protocol.AgentTask `json:"task"` }
-	json.NewDecoder(rr.Body).Decode(&wrap); task := wrap.Task
+	var wrap struct {
+		Task protocol.AgentTask `json:"task"`
+	}
+	json.NewDecoder(rr.Body).Decode(&wrap)
+	task := wrap.Task
 
 	if task.Status != "completed" {
 		t.Errorf("expected status 'completed', got '%s'", task.Status)
 	}
 	if task.CompletedAt == nil || *task.CompletedAt == "" {
 		t.Error("expected completed_at to be set")
+	}
+}
+
+func TestUpdateAgentTaskPersistsMessages(t *testing.T) {
+	h := newTestHandler(t)
+	h.DB.Exec(`INSERT INTO agents (id, workspace_id, name) VALUES ('a1', 'ws1', 'Agent')`)
+	h.DB.Exec(`INSERT INTO agent_tasks (id, agent_id, workspace_id, status) VALUES ('t1', 'a1', 'ws1', 'dispatched')`)
+
+	body := `{"status":"running","session_id":"sess-1","work_dir":"/tmp/mulwiki-job","messages":[{"role":"daemon","content":"task started","metadata":{"session_id":"sess-1"}}]}`
+	req := chiRequest(http.MethodPatch, "/api/workspaces/test-workspace/agents/a1/tasks/t1", map[string]string{"slug": "test-workspace", "id": "a1", "taskId": "t1"}, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.UpdateAgentTask(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var wrap struct {
+		Task protocol.AgentTask `json:"task"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&wrap); err != nil {
+		t.Fatalf("decode task: %v", err)
+	}
+	if wrap.Task.SessionID != "sess-1" {
+		t.Errorf("expected session_id sess-1, got %q", wrap.Task.SessionID)
+	}
+	if len(wrap.Task.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(wrap.Task.Messages))
+	}
+	if wrap.Task.Messages[0].Content != "task started" {
+		t.Errorf("unexpected message content %q", wrap.Task.Messages[0].Content)
 	}
 }
 
@@ -475,8 +532,11 @@ func TestListAgentTasks(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
 
-	var wrap struct { Tasks []protocol.AgentTask `json:"tasks"` }
-	json.NewDecoder(rr.Body).Decode(&wrap); tasks := wrap.Tasks
+	var wrap struct {
+		Tasks []protocol.AgentTask `json:"tasks"`
+	}
+	json.NewDecoder(rr.Body).Decode(&wrap)
+	tasks := wrap.Tasks
 
 	if len(tasks) != 2 {
 		t.Errorf("expected 2 tasks, got %d", len(tasks))

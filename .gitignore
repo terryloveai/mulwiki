@@ -4,6 +4,7 @@ node_modules
 .worktrees
 mulwiki.db
 server/data/repos
+server/internal/handler/data/
 .env
 *.zst
 

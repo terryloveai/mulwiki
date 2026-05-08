@@ -182,6 +182,18 @@ export interface AgentTask {
   attempt: number;
   max_attempts: number;
   created_at: string;
+  messages?: AgentTaskMessage[];
+}
+
+export interface AgentTaskMessage {
+  id: string;
+  task_id: string;
+  workspace_id: string;
+  agent_id: string;
+  role: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
 }
 
 /* ── Request / Response shapes ── */

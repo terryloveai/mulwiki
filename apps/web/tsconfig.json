@@ -35,6 +35,15 @@
       "@mulwiki/core/api": [
         "../../packages/core/api/index.ts"
       ],
+      "@mulwiki/core/queries": [
+        "../../packages/core/api/queries.ts"
+      ],
+      "@mulwiki/core/hooks": [
+        "../../packages/core/hooks/index.ts"
+      ],
+      "@mulwiki/views/*": [
+        "../../packages/views/*"
+      ],
       "@mulwiki/ui/components/*": [
         "../../packages/ui/components/*"
       ],

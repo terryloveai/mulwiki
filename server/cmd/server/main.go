@@ -104,14 +104,11 @@ func main() {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 
-	// Workspace middleware — resolve workspace from URL slug
-	r.Use(middleware.Workspace(db))
-
 	// CORS
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:5173"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-User-ID"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-User-ID", "X-Daemon-ID"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -120,50 +117,55 @@ func main() {
 	go runStaleAgentDetector(db, 5*time.Minute, 30*time.Second)
 
 	// --- Public routes ---
-	r.Group(func(r chi.Router) {
-		// Git repos — expose for daemon cloning (dumb HTTP protocol).
-		r.Handle("/repos/*", http.StripPrefix("/repos/", http.FileServer(http.Dir(filepath.Join(dataDir, "repos")))))
-		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			if err := db.Ping(); err != nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				w.Write([]byte(`{"status":"degraded","db":"unreachable"}`))
-				return
-			}
-			w.Write([]byte(`{"status":"ok","db":"connected"}`))
-		})
+	// Git repos — expose for daemon cloning (dumb HTTP protocol).
+	r.Handle("/repos/*", http.StripPrefix("/repos/", http.FileServer(http.Dir(filepath.Join(dataDir, "repos")))))
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := db.Ping(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"degraded","db":"unreachable"}`))
+			return
+		}
+		w.Write([]byte(`{"status":"ok","db":"connected"}`))
+	})
 
-		r.Route("/api/auth", func(r chi.Router) {
-			r.Post("/register", h.Register)
-			r.Post("/login", h.Login)
-			r.Post("/logout", h.Logout)
-			r.Get("/me", h.Me)
-		})
+	r.Route("/api/auth", func(r chi.Router) {
+		r.Post("/register", h.Register)
+		r.Post("/login", h.Login)
+		r.Post("/logout", h.Logout)
+		r.Get("/me", h.Me)
+	})
 
-		r.Get("/api/schemas/builtin", h.ListBuiltinSchemas)
+	r.Get("/api/schemas/builtin", h.ListBuiltinSchemas)
 
-		// Workspaces (public for now; auth can be added later)
-		r.Route("/api/workspaces", func(r chi.Router) {
+	// --- Workspace routes ---
+	r.Route("/api/workspaces", func(r chi.Router) {
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Auth(db))
 			r.Get("/", h.ListWorkspaces)
 			r.Post("/", h.CreateWorkspace)
 			r.Route("/{slug}", func(r chi.Router) {
+				r.Use(middleware.Workspace(db))
+				r.Use(middleware.RequireWorkspaceMember(db))
+				r.Use(middleware.RequireMember())
+
 				r.Get("/", h.GetWorkspace)
-				r.Patch("/", h.UpdateWorkspace)
-				r.Delete("/", h.DeleteWorkspace)
+				r.With(middleware.RequireAdmin()).Patch("/", h.UpdateWorkspace)
+				r.With(middleware.RequireOwner()).Delete("/", h.DeleteWorkspace)
 
 				// Schemas
 				r.Route("/schemas", func(r chi.Router) {
 					r.Get("/", h.ListSchemas)
-					r.Post("/", h.CreateSchema)
-					r.Post("/fork", h.ForkSchema)
+					r.With(middleware.RequireAdmin()).Post("/", h.CreateSchema)
+					r.With(middleware.RequireAdmin()).Post("/fork", h.ForkSchema)
 					r.Post("/validate", h.ValidateSchema)
 					r.Get("/{id}", h.GetSchema)
-					r.Put("/{id}", h.UpdateSchema)
-					r.Delete("/{id}", h.DeleteSchema)
+					r.With(middleware.RequireAdmin()).Put("/{id}", h.UpdateSchema)
+					r.With(middleware.RequireAdmin()).Delete("/{id}", h.DeleteSchema)
 				})
 
 				// Workspace-level actions
-				r.Put("/activate-schema", h.ActivateSchema)
+				r.With(middleware.RequireAdmin()).Put("/activate-schema", h.ActivateSchema)
 
 				// Sources (git-backed — wildcard path)
 				r.Route("/sources", func(r chi.Router) {
@@ -192,14 +194,6 @@ func main() {
 					r.Post("/", h.CreateJob)
 					r.Get("/{id}", h.GetJob)
 					r.Get("/{id}/logs", h.StreamJobLogs)
-
-					// Daemon-facing job endpoints
-					r.Post("/claim", h.ClaimJob)
-					r.Post("/{id}/log-line", h.AppendJobLog)
-					r.Post("/{id}/progress", h.UpdateJobProgress)
-					r.Post("/{id}/complete", h.CompleteJob)
-					r.Post("/{id}/fail", h.FailJob)
-					r.Post("/{id}/output", h.SubmitJobOutput)
 				})
 
 				// Agents
@@ -231,7 +225,6 @@ func main() {
 						r.Patch("/", h.UpdateAgent)
 						r.Post("/archive", h.ArchiveAgent)
 						r.Post("/restore", h.RestoreAgent)
-						r.Post("/heartbeat", h.AgentHeartbeat)
 
 						// Agent-skill associations
 						r.Route("/skills", func(r chi.Router) {
@@ -243,7 +236,6 @@ func main() {
 						r.Route("/tasks", func(r chi.Router) {
 							r.Get("/", h.ListAgentTasks)
 							r.Post("/", h.CreateAgentTask)
-							r.Post("/claim", h.ClaimAgentTask)
 							r.Get("/{taskId}", h.GetAgentTask)
 							r.Patch("/{taskId}", h.UpdateAgentTask)
 						})
@@ -251,24 +243,51 @@ func main() {
 				})
 			})
 		})
-	})
 
-	// --- Protected routes (with JWT auth) ---
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth)
-		// Protected workspace routes use the same handlers;
-		// the middleware sets X-User-ID header.
+		// Daemon-facing workspace routes use daemon identity, not user membership.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.DaemonIdentity)
+			r.Route("/{slug}", func(r chi.Router) {
+				r.Use(middleware.Workspace(db))
+
+				r.Route("/jobs", func(r chi.Router) {
+					r.Post("/claim", h.ClaimJob)
+					r.Post("/{id}/log-line", h.AppendJobLog)
+					r.Post("/{id}/progress", h.UpdateJobProgress)
+					r.Post("/{id}/complete", h.CompleteJob)
+					r.Post("/{id}/fail", h.FailJob)
+					r.Post("/{id}/output", h.SubmitJobOutput)
+				})
+
+				r.Route("/agents/{id}", func(r chi.Router) {
+					r.Post("/heartbeat", h.AgentHeartbeat)
+					r.Post("/tasks/claim", h.ClaimAgentTask)
+				})
+			})
+		})
 	})
 
 	// --- Daemon routes ---
 	r.Route("/api/daemon", func(r chi.Router) {
 		r.Get("/", h.ListDaemons)
-		r.Post("/register", h.DaemonRegister)
-		r.Post("/heartbeat", h.DaemonHeartbeat)
+		r.With(middleware.DaemonIdentity).Post("/register", h.DaemonRegister)
+		r.With(middleware.DaemonIdentity).Post("/heartbeat", h.DaemonHeartbeat)
 		r.Get("/stale", h.DaemonStale)
 		r.Get("/{id}/logs", h.GetDaemonLogs)
 		r.Post("/{id}/stop", h.StopDaemon)
 		r.Post("/start", h.StartDaemon)
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.DaemonIdentity)
+			r.Route("/workspaces/{slug}", func(r chi.Router) {
+				r.Use(middleware.Workspace(db))
+				r.Get("/", h.GetWorkspace)
+				r.Get("/schemas/{id}", h.GetSchema)
+				r.Get("/agents/runtimes/{id}", h.GetRuntime)
+				r.Get("/agents/{id}", h.GetAgent)
+				r.Post("/agents/{id}/tasks", h.CreateAgentTask)
+				r.Patch("/agents/{id}/tasks/{taskId}", h.UpdateAgentTask)
+			})
+		})
 	})
 
 	// --- WebSocket ---

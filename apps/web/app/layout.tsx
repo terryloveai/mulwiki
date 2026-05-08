@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
-import { ThemeProvider } from "@mulwiki/ui/hooks/useTheme";
+import { Providers } from "./providers";
 import "./globals.css";
 
 const inter = Inter({
@@ -48,7 +48,7 @@ export default function RootLayout({
       className={`${inter.variable} font-sans antialiased`}
     >
       <body className="bg-background text-foreground">
-        <ThemeProvider>{children}</ThemeProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

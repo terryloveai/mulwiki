@@ -5,13 +5,13 @@ import "encoding/json"
 // Workspace models.
 
 type Workspace struct {
-	ID              string  `json:"id"`
-	Slug            string  `json:"slug"`
-	Name            string  `json:"name"`
-	Description     string  `json:"description"`
+	ID               string  `json:"id"`
+	Slug             string  `json:"slug"`
+	Name             string  `json:"name"`
+	Description      string  `json:"description"`
 	ActiveSchemaPath *string `json:"active_schema_path,omitempty"`
 	ActiveSchemaID   *string `json:"active_schema_id,omitempty"`
-	CreatedAt       string  `json:"created_at"`
+	CreatedAt        string  `json:"created_at"`
 }
 
 type CreateWorkspaceRequest struct {
@@ -98,18 +98,18 @@ type AuthRequest struct {
 // Source models (git-backed — file_path is the primary identifier).
 
 type Source struct {
-	Name    string `json:"name"`     // basename, e.g. "doc.pdf"
-	Type    string `json:"type"`     // inferred from extension
-	Path    string `json:"path"`     // git path, e.g. "sources/doc.pdf"
-	Size    int64  `json:"size"`     // bytes from git cat-file -s
+	Name string `json:"name"` // basename, e.g. "doc.pdf"
+	Type string `json:"type"` // inferred from extension
+	Path string `json:"path"` // git path, e.g. "sources/doc.pdf"
+	Size int64  `json:"size"` // bytes from git cat-file -s
 }
 
 // Wiki page models (git-backed — path.md files with frontmatter).
 
 type WikiPage struct {
-	Path    string `json:"path"`     // e.g. "/concepts/ai"
+	Path    string `json:"path"` // e.g. "/concepts/ai"
 	Title   string `json:"title"`
-	Content string `json:"content"`  // body (without frontmatter)
+	Content string `json:"content"` // body (without frontmatter)
 	Type    string `json:"type"`
 	Layer   string `json:"layer,omitempty"`
 }
@@ -147,11 +147,11 @@ type Job struct {
 }
 
 type CreateJobRequest struct {
-	AgentID   string   `json:"agent_id"`
+	AgentID     string   `json:"agent_id"`
 	SourcePath  string   `json:"source_path"`
 	SourcePaths []string `json:"source_paths"`
-	SchemaID  string   `json:"schema_id"`
-	ClaimedBy string   `json:"claimed_by,omitempty"`
+	SchemaID    string   `json:"schema_id"`
+	ClaimedBy   string   `json:"claimed_by,omitempty"`
 }
 
 // Agent models.
@@ -264,27 +264,45 @@ type AddAgentSkillRequest struct {
 }
 
 type AgentTask struct {
-	ID            string  `json:"id"`
-	AgentID       string  `json:"agent_id"`
-	RuntimeID     *string `json:"runtime_id,omitempty"`
-	WorkspaceID   string  `json:"workspace_id"`
-	SourcePath    string  `json:"source_path"`
-	SchemaID      string  `json:"schema_id"`
-	Status        string  `json:"status"`
-	Priority      int     `json:"priority"`
-	ParentTaskID  *string `json:"parent_task_id,omitempty"`
-	SessionID     string  `json:"session_id"`
-	WorkDir       string  `json:"work_dir"`
-	FailureReason string  `json:"failure_reason"`
-	DaemonID      string  `json:"daemon_id"`
-	DispatchedAt  *string `json:"dispatched_at,omitempty"`
-	StartedAt     *string `json:"started_at,omitempty"`
-	CompletedAt   *string `json:"completed_at,omitempty"`
-	Result        string  `json:"result"`
-	Error         string  `json:"error"`
-	Attempt       int     `json:"attempt"`
-	MaxAttempts   int     `json:"max_attempts"`
-	CreatedAt     string  `json:"created_at"`
+	ID            string             `json:"id"`
+	AgentID       string             `json:"agent_id"`
+	RuntimeID     *string            `json:"runtime_id,omitempty"`
+	WorkspaceID   string             `json:"workspace_id"`
+	SourcePath    string             `json:"source_path"`
+	SchemaID      string             `json:"schema_id"`
+	Status        string             `json:"status"`
+	Priority      int                `json:"priority"`
+	ParentTaskID  *string            `json:"parent_task_id,omitempty"`
+	SessionID     string             `json:"session_id"`
+	WorkDir       string             `json:"work_dir"`
+	FailureReason string             `json:"failure_reason"`
+	DaemonID      string             `json:"daemon_id"`
+	DispatchedAt  *string            `json:"dispatched_at,omitempty"`
+	StartedAt     *string            `json:"started_at,omitempty"`
+	CompletedAt   *string            `json:"completed_at,omitempty"`
+	Result        string             `json:"result"`
+	Error         string             `json:"error"`
+	Attempt       int                `json:"attempt"`
+	MaxAttempts   int                `json:"max_attempts"`
+	CreatedAt     string             `json:"created_at"`
+	Messages      []AgentTaskMessage `json:"messages,omitempty"`
+}
+
+type AgentTaskMessage struct {
+	ID          string          `json:"id"`
+	TaskID      string          `json:"task_id"`
+	WorkspaceID string          `json:"workspace_id"`
+	AgentID     string          `json:"agent_id"`
+	Role        string          `json:"role"`
+	Content     string          `json:"content"`
+	Metadata    json.RawMessage `json:"metadata"`
+	CreatedAt   string          `json:"created_at"`
+}
+
+type AgentTaskMessageInput struct {
+	Role     string          `json:"role"`
+	Content  string          `json:"content"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
 }
 
 // Daemon models.
