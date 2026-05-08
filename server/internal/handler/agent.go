@@ -15,101 +15,29 @@ import (
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
+func redactAgentCustomEnv(agent *protocol.Agent, currentUser string, isDaemon bool) {
+	if agent.OwnerID != "" && agent.OwnerID != currentUser && !isDaemon {
+		agent.CustomEnv = nil
+	}
+}
+
 // GET /api/workspaces/{slug}/agents
 func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	currentUser := userID(r)
 
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 
-	rows, err := h.DB.Query(
-		`SELECT id, workspace_id, COALESCE(runtime_id,''), name, description, instructions,
-		        runtime_mode, runtime_config, custom_env, custom_args, mcp_config,
-		        visibility, status, model, max_concurrent_tasks,
-		        COALESCE(owner_id,''), created_at, updated_at, archived_at, archived_by
-		 FROM agents WHERE workspace_id = ? ORDER BY created_at DESC`, workspaceID,
-	)
+	agents, err := store.NewAgentStore(h.DB).ListByWorkspace(r.Context(), workspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list agents")
 		return
 	}
-	defer rows.Close()
-
-	agents := make([]protocol.Agent, 0)
-	agentIDs := make([]string, 0)
-	for rows.Next() {
-		var a protocol.Agent
-		var runtimeConfig, customEnv, customArgs, mcpConfig string
-		var archivedAt, archivedBy sql.NullString
-		if err := rows.Scan(
-			&a.ID, &a.WorkspaceID, &a.RuntimeID, &a.Name, &a.Description, &a.Instructions,
-			&a.RuntimeMode, &runtimeConfig, &customEnv, &customArgs, &mcpConfig,
-			&a.Visibility, &a.Status, &a.Model, &a.MaxConcurrentTasks,
-			&a.OwnerID, &a.CreatedAt, &a.UpdatedAt, &archivedAt, &archivedBy,
-		); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to scan agent")
-			return
-		}
-		a.RuntimeConfig = json.RawMessage(runtimeConfig)
-		a.McpConfig = json.RawMessage(mcpConfig)
-		json.Unmarshal([]byte(customEnv), &a.CustomEnv)
-		json.Unmarshal([]byte(customArgs), &a.CustomArgs)
-		if archivedAt.Valid {
-			a.ArchivedAt = &archivedAt.String
-		}
-		if archivedBy.Valid {
-			a.ArchivedBy = &archivedBy.String
-		}
-		if a.CustomEnv == nil {
-			a.CustomEnv = make(map[string]string)
-		}
-		if a.CustomArgs == nil {
-			a.CustomArgs = make([]string, 0)
-		}
-		a.Skills = make([]protocol.AgentSkill, 0)
-
-		// Redact custom_env for non-owners
-		if a.OwnerID != "" && a.OwnerID != currentUser && !isDaemonRequest(r) {
-			a.CustomEnv = nil
-		}
-
-		agents = append(agents, a)
-		agentIDs = append(agentIDs, a.ID)
-	}
-
-	// Batch-load skills for all agents
-	if len(agentIDs) > 0 {
-		skillMap := make(map[string][]protocol.AgentSkill)
-		placeholders := make([]string, len(agentIDs))
-		args := make([]any, len(agentIDs))
-		for i, id := range agentIDs {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		query := `SELECT asa.agent_id, s.id, s.name, s.description
-			 FROM agent_skills_agents asa
-			 JOIN agent_skills s ON s.id = asa.skill_id
-			 WHERE asa.agent_id IN (` + strings.Join(placeholders, ",") + `)`
-		skillRows, err := h.DB.Query(query, args...)
-		if err == nil {
-			defer skillRows.Close()
-			for skillRows.Next() {
-				var agentID string
-				var sk protocol.AgentSkill
-				if err := skillRows.Scan(&agentID, &sk.ID, &sk.Name, &sk.Description); err == nil {
-					skillMap[agentID] = append(skillMap[agentID], sk)
-				}
-			}
-		}
-		for i := range agents {
-			if skills, ok := skillMap[agents[i].ID]; ok {
-				agents[i].Skills = skills
-			}
-		}
+	for i := range agents {
+		redactAgentCustomEnv(&agents[i], currentUser, isDaemonRequest(r))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
@@ -117,11 +45,10 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/agents
 func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	currentUser := userID(r)
 
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
@@ -141,7 +68,7 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	runtimeMode := ""
 	if req.RuntimeID != "" {
 		var backend string
-		if err := h.DB.QueryRow(
+		if err := h.DB.QueryRowContext(r.Context(),
 			`SELECT backend FROM agent_runtimes WHERE id = ? AND workspace_id = ?`,
 			req.RuntimeID, workspaceID,
 		).Scan(&backend); err != nil {
@@ -182,51 +109,29 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	ownerID := currentUser
 
-	var a protocol.Agent
-	var dbRuntimeConfig, dbCustomEnv, dbCustomArgs, dbMcpConfig string
-	var archivedAt, archivedBy sql.NullString
-	err := h.DB.QueryRow(
+	var agentID string
+	err = h.DB.QueryRowContext(r.Context(),
 		`INSERT INTO agents (workspace_id, runtime_id, name, description, instructions,
 		                     runtime_mode, runtime_config, custom_env, custom_args, mcp_config,
 		                     visibility, status, model, max_concurrent_tasks, owner_id,
 		                     created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'offline', ?, ?, ?, ?, ?)
-		 RETURNING id, workspace_id, COALESCE(runtime_id,''), name, description, instructions,
-		           runtime_mode, runtime_config, custom_env, custom_args, mcp_config,
-		           visibility, status, model, max_concurrent_tasks,
-		           COALESCE(owner_id,''), created_at, updated_at, archived_at, archived_by`,
+		 RETURNING id`,
 		workspaceID, nullStr(req.RuntimeID), req.Name, req.Description, req.Instructions,
 		runtimeMode, runtimeConfig, string(customEnv), string(customArgs), mcpConfig,
 		visibility, req.Model, maxConcurrent, nullStr(ownerID),
 		now, now,
-	).Scan(
-		&a.ID, &a.WorkspaceID, &a.RuntimeID, &a.Name, &a.Description, &a.Instructions,
-		&a.RuntimeMode, &dbRuntimeConfig, &dbCustomEnv, &dbCustomArgs, &dbMcpConfig,
-		&a.Visibility, &a.Status, &a.Model, &a.MaxConcurrentTasks,
-		&a.OwnerID, &a.CreatedAt, &a.UpdatedAt, &archivedAt, &archivedBy,
-	)
+	).Scan(&agentID)
 	if err != nil {
 		slog.Error("CreateAgent insert failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to create agent")
 		return
 	}
 
-	a.RuntimeConfig = json.RawMessage(dbRuntimeConfig)
-	a.McpConfig = json.RawMessage(dbMcpConfig)
-	json.Unmarshal([]byte(dbCustomEnv), &a.CustomEnv)
-	json.Unmarshal([]byte(dbCustomArgs), &a.CustomArgs)
-	if a.CustomEnv == nil {
-		a.CustomEnv = make(map[string]string)
-	}
-	if a.CustomArgs == nil {
-		a.CustomArgs = make([]string, 0)
-	}
-	a.Skills = make([]protocol.AgentSkill, 0)
-	if archivedAt.Valid {
-		a.ArchivedAt = &archivedAt.String
-	}
-	if archivedBy.Valid {
-		a.ArchivedBy = &archivedBy.String
+	a, err := store.NewAgentStore(h.DB).GetInWorkspace(r.Context(), workspaceID, agentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to fetch created agent")
+		return
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{"agent": a})
@@ -234,88 +139,48 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/workspaces/{slug}/agents/{id}
 func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 	currentUser := userID(r)
 
-	var a protocol.Agent
-	var runtimeConfig, customEnv, customArgs, mcpConfig string
-	var archivedAt, archivedBy sql.NullString
-	err := h.DB.QueryRow(
-		`SELECT a.id, a.workspace_id, COALESCE(a.runtime_id,''), a.name, a.description, a.instructions,
-		        a.runtime_mode, a.runtime_config, a.custom_env, a.custom_args, a.mcp_config,
-		        a.visibility, a.status, a.model, a.max_concurrent_tasks,
-		        COALESCE(a.owner_id,''), a.created_at, a.updated_at, a.archived_at, a.archived_by
-		 FROM agents a
-		 JOIN workspaces w ON w.id = a.workspace_id
-		 WHERE w.slug = ? AND a.id = ?`, slug, id,
-	).Scan(
-		&a.ID, &a.WorkspaceID, &a.RuntimeID, &a.Name, &a.Description, &a.Instructions,
-		&a.RuntimeMode, &runtimeConfig, &customEnv, &customArgs, &mcpConfig,
-		&a.Visibility, &a.Status, &a.Model, &a.MaxConcurrentTasks,
-		&a.OwnerID, &a.CreatedAt, &a.UpdatedAt, &archivedAt, &archivedBy,
-	)
+	workspaceID, err := h.workspaceIDForRequest(r)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "agent not found")
+		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 
-	a.RuntimeConfig = json.RawMessage(runtimeConfig)
-	a.McpConfig = json.RawMessage(mcpConfig)
-	json.Unmarshal([]byte(customEnv), &a.CustomEnv)
-	json.Unmarshal([]byte(customArgs), &a.CustomArgs)
-	if a.CustomEnv == nil {
-		a.CustomEnv = make(map[string]string)
-	}
-	if a.CustomArgs == nil {
-		a.CustomArgs = make([]string, 0)
-	}
-	if archivedAt.Valid {
-		a.ArchivedAt = &archivedAt.String
-	}
-	if archivedBy.Valid {
-		a.ArchivedBy = &archivedBy.String
-	}
-
-	// Redact custom_env for non-owners
-	if a.OwnerID != "" && a.OwnerID != currentUser && !isDaemonRequest(r) {
-		a.CustomEnv = nil
-	}
-
-	// Load skills
-	a.Skills = make([]protocol.AgentSkill, 0)
-	skillRows, err := h.DB.Query(
-		`SELECT s.id, s.name, s.description
-		 FROM agent_skills_agents asa
-		 JOIN agent_skills s ON s.id = asa.skill_id
-		 WHERE asa.agent_id = ?`, a.ID,
-	)
-	if err == nil {
-		defer skillRows.Close()
-		for skillRows.Next() {
-			var sk protocol.AgentSkill
-			if err := skillRows.Scan(&sk.ID, &sk.Name, &sk.Description); err == nil {
-				a.Skills = append(a.Skills, sk)
-			}
+	a, err := store.NewAgentStore(h.DB).GetInWorkspace(r.Context(), workspaceID, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "agent not found")
+			return
 		}
+		writeError(w, http.StatusInternalServerError, "failed to load agent")
+		return
 	}
+
+	redactAgentCustomEnv(a, currentUser, isDaemonRequest(r))
 
 	writeJSON(w, http.StatusOK, map[string]any{"agent": a})
 }
 
 // PATCH /api/workspaces/{slug}/agents/{id}
 func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 	currentUser := userID(r)
 
-	// Verify agent exists and get workspace
-	var workspaceID, ownerID string
-	if err := h.DB.QueryRow(
-		`SELECT a.workspace_id, COALESCE(a.owner_id,'') FROM agents a
-		 JOIN workspaces w ON w.id = a.workspace_id
-		 WHERE w.slug = ? AND a.id = ?`, slug, id,
-	).Scan(&workspaceID, &ownerID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+
+	agentStore := store.NewAgentStore(h.DB)
+	_, err = agentStore.GetInWorkspace(r.Context(), workspaceID, id)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to load agent")
+			return
+		}
 		writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
@@ -348,7 +213,7 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		runtimeMode := ""
 		if *req.RuntimeID != "" {
 			var backend string
-			if err := h.DB.QueryRow(
+			if err := h.DB.QueryRowContext(r.Context(),
 				`SELECT backend FROM agent_runtimes WHERE id = ? AND workspace_id = ?`,
 				*req.RuntimeID, workspaceID,
 			).Scan(&backend); err != nil {
@@ -359,10 +224,8 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		setClauses = append(setClauses, "runtime_id = ?")
 		args = append(args, nullStr(*req.RuntimeID))
-		if runtimeMode != "" {
-			setClauses = append(setClauses, "runtime_mode = ?")
-			args = append(args, runtimeMode)
-		}
+		setClauses = append(setClauses, "runtime_mode = ?")
+		args = append(args, runtimeMode)
 	}
 	if len(req.RuntimeConfig) > 0 {
 		setClauses = append(setClauses, "runtime_config = ?")
@@ -402,75 +265,22 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 	setClauses = append(setClauses, "updated_at = ?")
 	args = append(args, now)
-	args = append(args, id)
+	args = append(args, id, workspaceID)
 
-	query := `UPDATE agents SET ` + strings.Join(setClauses, ", ") + ` WHERE id = ?`
+	query := `UPDATE agents SET ` + strings.Join(setClauses, ", ") + ` WHERE id = ? AND workspace_id = ?`
 
-	if _, err := h.DB.Exec(query, args...); err != nil {
+	if _, err := h.DB.ExecContext(r.Context(), query, args...); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update agent")
 		return
 	}
 
-	// Return updated agent
-	var a protocol.Agent
-	var runtimeConfig, customEnv, customArgs, mcpConfig string
-	var archivedAt, archivedBy sql.NullString
-	err := h.DB.QueryRow(
-		`SELECT a.id, a.workspace_id, COALESCE(a.runtime_id,''), a.name, a.description, a.instructions,
-		        a.runtime_mode, a.runtime_config, a.custom_env, a.custom_args, a.mcp_config,
-		        a.visibility, a.status, a.model, a.max_concurrent_tasks,
-		        COALESCE(a.owner_id,''), a.created_at, a.updated_at, a.archived_at, a.archived_by
-		 FROM agents a WHERE a.id = ?`, id,
-	).Scan(
-		&a.ID, &a.WorkspaceID, &a.RuntimeID, &a.Name, &a.Description, &a.Instructions,
-		&a.RuntimeMode, &runtimeConfig, &customEnv, &customArgs, &mcpConfig,
-		&a.Visibility, &a.Status, &a.Model, &a.MaxConcurrentTasks,
-		&a.OwnerID, &a.CreatedAt, &a.UpdatedAt, &archivedAt, &archivedBy,
-	)
+	a, err := agentStore.GetInWorkspace(r.Context(), workspaceID, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to fetch updated agent")
 		return
 	}
 
-	a.RuntimeConfig = json.RawMessage(runtimeConfig)
-	a.McpConfig = json.RawMessage(mcpConfig)
-	json.Unmarshal([]byte(customEnv), &a.CustomEnv)
-	json.Unmarshal([]byte(customArgs), &a.CustomArgs)
-	if a.CustomEnv == nil {
-		a.CustomEnv = make(map[string]string)
-	}
-	if a.CustomArgs == nil {
-		a.CustomArgs = make([]string, 0)
-	}
-	if archivedAt.Valid {
-		a.ArchivedAt = &archivedAt.String
-	}
-	if archivedBy.Valid {
-		a.ArchivedBy = &archivedBy.String
-	}
-
-	// Redact custom_env for non-owners
-	if a.OwnerID != "" && a.OwnerID != currentUser {
-		a.CustomEnv = nil
-	}
-
-	// Load skills
-	a.Skills = make([]protocol.AgentSkill, 0)
-	skillRows, err := h.DB.Query(
-		`SELECT s.id, s.name, s.description
-		 FROM agent_skills_agents asa
-		 JOIN agent_skills s ON s.id = asa.skill_id
-		 WHERE asa.agent_id = ?`, a.ID,
-	)
-	if err == nil {
-		defer skillRows.Close()
-		for skillRows.Next() {
-			var sk protocol.AgentSkill
-			if err := skillRows.Scan(&sk.ID, &sk.Name, &sk.Description); err == nil {
-				a.Skills = append(a.Skills, sk)
-			}
-		}
-	}
+	redactAgentCustomEnv(a, currentUser, isDaemonRequest(r))
 
 	writeJSON(w, http.StatusOK, map[string]any{"agent": a})
 
@@ -479,16 +289,21 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/agents/{id}/archive
 func (h *Handler) ArchiveAgent(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 	currentUser := userID(r)
 
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := h.DB.Exec(
+	res, err := h.DB.ExecContext(r.Context(),
 		`UPDATE agents SET archived_at = ?, archived_by = ?, updated_at = ?
-		 WHERE id = ? AND workspace_id = (SELECT id FROM workspaces WHERE slug = ?)`,
-		now, currentUser, now, id, slug,
+		 WHERE id = ? AND workspace_id = ?`,
+		now, currentUser, now, id, workspaceID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to archive agent")
@@ -506,15 +321,20 @@ func (h *Handler) ArchiveAgent(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/agents/{id}/restore
 func (h *Handler) RestoreAgent(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
+
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := h.DB.Exec(
+	res, err := h.DB.ExecContext(r.Context(),
 		`UPDATE agents SET archived_at = NULL, archived_by = NULL, updated_at = ?
-		 WHERE id = ? AND workspace_id = (SELECT id FROM workspaces WHERE slug = ?)`,
-		now, id, slug,
+		 WHERE id = ? AND workspace_id = ?`,
+		now, id, workspaceID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to restore agent")
@@ -532,26 +352,25 @@ func (h *Handler) RestoreAgent(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/workspaces/{slug}/agents/{id}/tasks
 func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	// Verify agent exists in workspace
-	var workspaceID string
-	if err := h.DB.QueryRow(
-		`SELECT a.workspace_id FROM agents a
-		 JOIN workspaces w ON w.id = a.workspace_id
-		 WHERE w.slug = ? AND a.id = ?`, slug, id,
-	).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	if _, err := store.NewAgentStore(h.DB).GetInWorkspace(r.Context(), workspaceID, id); err != nil {
 		writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
 
-	rows, err := h.DB.Query(
+	rows, err := h.DB.QueryContext(r.Context(),
 		`SELECT id, agent_id, runtime_id, workspace_id, source_path, schema_id,
 		        status, priority, parent_task_id, session_id, work_dir,
 		        failure_reason, daemon_id, dispatched_at, started_at, completed_at,
 		        result, error, attempt, max_attempts, created_at
-		 FROM agent_tasks WHERE agent_id = ? ORDER BY created_at DESC`, id,
+		 FROM agent_tasks WHERE agent_id = ? AND workspace_id = ? ORDER BY created_at DESC`,
+		id, workspaceID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list tasks")
@@ -589,52 +408,29 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		tasks = append(tasks, t)
 	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to iterate tasks")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
 }
 
 // GET /api/workspaces/{slug}/agents/{id}/tasks/{taskId}
 func (h *Handler) GetAgentTask(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 	taskID := idParam(r, "taskId")
 
-	var t protocol.AgentTask
-	var runtimeID, dispatchedAt, startedAt, completedAt, parentTaskID sql.NullString
-	err := h.DB.QueryRow(
-		`SELECT t.id, t.agent_id, t.runtime_id, t.workspace_id, t.source_path, t.schema_id,
-		        t.status, t.priority, t.parent_task_id, t.session_id, t.work_dir,
-		        t.failure_reason, t.daemon_id, t.dispatched_at, t.started_at, t.completed_at,
-		        t.result, t.error, t.attempt, t.max_attempts, t.created_at
-		 FROM agent_tasks t
-		 JOIN agents a ON a.id = t.agent_id
-		 JOIN workspaces w ON w.id = a.workspace_id
-		 WHERE w.slug = ? AND a.id = ? AND t.id = ?`, slug, id, taskID,
-	).Scan(
-		&t.ID, &t.AgentID, &runtimeID, &t.WorkspaceID, &t.SourcePath, &t.SchemaID,
-		&t.Status, &t.Priority, &parentTaskID, &t.SessionID, &t.WorkDir,
-		&t.FailureReason, &t.DaemonID, &dispatchedAt, &startedAt, &completedAt,
-		&t.Result, &t.Error, &t.Attempt, &t.MaxAttempts, &t.CreatedAt,
-	)
+	workspaceID, err := h.workspaceIDForRequest(r)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "task not found")
+		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 
-	if runtimeID.Valid {
-		t.RuntimeID = &runtimeID.String
-	}
-	if dispatchedAt.Valid {
-		t.DispatchedAt = &dispatchedAt.String
-	}
-	if startedAt.Valid {
-		t.StartedAt = &startedAt.String
-	}
-	if completedAt.Valid {
-		t.CompletedAt = &completedAt.String
-	}
-	if parentTaskID.Valid {
-		t.ParentTaskID = &parentTaskID.String
+	t, err := store.NewTaskStore(h.DB).GetInWorkspace(r.Context(), workspaceID, taskID)
+	if err != nil || t.AgentID != id {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
 	}
 	messages, err := h.loadAgentTaskMessages(t.ID)
 	if err != nil {
@@ -648,15 +444,14 @@ func (h *Handler) GetAgentTask(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/agents/{id}/tasks — daemon creates a task record
 func (h *Handler) CreateAgentTask(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	var workspaceID string
-	if err := h.DB.QueryRow(
-		`SELECT a.workspace_id FROM agents a
-		 JOIN workspaces w ON w.id = a.workspace_id
-		 WHERE w.slug = ? AND a.id = ?`, slug, id,
-	).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	if _, err := store.NewAgentStore(h.DB).GetInWorkspace(r.Context(), workspaceID, id); err != nil {
 		writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
@@ -707,7 +502,7 @@ func (h *Handler) CreateAgentTask(w http.ResponseWriter, r *http.Request) {
 
 	if t == nil {
 		now := time.Now().UTC().Format(time.RFC3339)
-		row := h.DB.QueryRow(
+		row := h.DB.QueryRowContext(r.Context(),
 			`INSERT INTO agent_tasks (job_id, agent_id, runtime_id, workspace_id, source_path, schema_id,
 			                          status, priority, parent_task_id, session_id, work_dir,
 			                          attempt, max_attempts, created_at)
@@ -751,17 +546,16 @@ func (h *Handler) CreateAgentTask(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /api/workspaces/{slug}/agents/{id}/tasks/{taskId} — daemon updates task status
 func (h *Handler) UpdateAgentTask(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 	taskID := idParam(r, "taskId")
 
-	var workspaceID string
-	if err := h.DB.QueryRow(
-		`SELECT t.workspace_id FROM agent_tasks t
-		 JOIN agents a ON a.id = t.agent_id
-		 JOIN workspaces w ON w.id = a.workspace_id
-		 WHERE w.slug = ? AND a.id = ? AND t.id = ?`, slug, id, taskID,
-	).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	existingTask, err := store.NewTaskStore(h.DB).GetInWorkspace(r.Context(), workspaceID, taskID)
+	if err != nil || existingTask.AgentID != id {
 		writeError(w, http.StatusNotFound, "task not found")
 		return
 	}
@@ -799,7 +593,6 @@ func (h *Handler) UpdateAgentTask(w http.ResponseWriter, r *http.Request) {
 
 	taskService := service.NewTaskService(h.DB, h.EventBus)
 	var t *protocol.AgentTask
-	var err error
 
 	switch req.Status {
 	case "":
@@ -985,15 +778,14 @@ type ClaimAgentTaskRequest struct {
 
 // POST /api/workspaces/{slug}/agents/{id}/tasks/claim — daemon atomically claims the next queued task
 func (h *Handler) ClaimAgentTask(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	var workspaceID string
-	if err := h.DB.QueryRow(
-		`SELECT a.workspace_id FROM agents a
-		 JOIN workspaces w ON w.id = a.workspace_id
-		 WHERE w.slug = ? AND a.id = ?`, slug, id,
-	).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	if _, err := store.NewAgentStore(h.DB).GetInWorkspace(r.Context(), workspaceID, id); err != nil {
 		writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
@@ -1031,14 +823,19 @@ func (h *Handler) ClaimAgentTask(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/agents/{id}/heartbeat — daemon heartbeat (keeps agent online)
 func (h *Handler) AgentHeartbeat(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := h.DB.Exec(
+	res, err := h.DB.ExecContext(r.Context(),
 		`UPDATE agents SET status = 'online', updated_at = ?
-		 WHERE id = ? AND workspace_id = (SELECT id FROM workspaces WHERE slug = ?)`,
-		now, id, slug,
+		 WHERE id = ? AND workspace_id = ?`,
+		now, id, workspaceID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "heartbeat failed")

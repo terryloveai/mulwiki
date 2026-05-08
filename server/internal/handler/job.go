@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tethy/mulwiki/server/internal/service"
+	"github.com/tethy/mulwiki/server/internal/store"
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
@@ -147,7 +148,7 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobs, err := service.NewJobService(h.DB).ListJobs(workspaceID)
+	jobs, err := store.NewJobStore(h.DB).ListByWorkspace(r.Context(), workspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list jobs")
 		return
@@ -205,8 +206,12 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j, err := service.NewJobService(h.DB).GetWorkspaceJob(workspaceID, id)
+	j, err := store.NewJobStore(h.DB).GetInWorkspace(r.Context(), workspaceID, id)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to load job")
+			return
+		}
 		writeError(w, http.StatusNotFound, "job not found")
 		return
 	}
@@ -233,7 +238,7 @@ func (h *Handler) AppendJobLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var exists int
-	if err := h.DB.QueryRow(`SELECT COUNT(*) FROM jobs WHERE id = ? AND workspace_id = ?`, id, workspaceID).Scan(&exists); err != nil || exists == 0 {
+	if err := h.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM jobs WHERE id = ? AND workspace_id = ?`, id, workspaceID).Scan(&exists); err != nil || exists == 0 {
 		writeError(w, http.StatusNotFound, "job not found")
 		return
 	}
@@ -247,21 +252,20 @@ func (h *Handler) AppendJobLog(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/workspaces/{slug}/jobs/{id}/logs — stream logs via SSE
 func (h *Handler) StreamJobLogs(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 
 	// Verify job exists
-	var status string
-	err := h.DB.QueryRow(
-		`SELECT status FROM jobs WHERE id = ? AND workspace_id = ?`, id, workspaceID,
-	).Scan(&status)
-	if err != nil {
+	if _, err := store.NewJobStore(h.DB).GetInWorkspace(r.Context(), workspaceID, id); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to load job")
+			return
+		}
 		writeError(w, http.StatusNotFound, "job not found")
 		return
 	}
@@ -295,8 +299,10 @@ func (h *Handler) StreamJobLogs(w http.ResponseWriter, r *http.Request) {
 			var progress int
 			var jobError string
 			var completedAt *string
-			err := h.DB.QueryRow(
-				`SELECT status, progress, error, completed_at FROM jobs WHERE id = ?`, id,
+			err := h.DB.QueryRowContext(
+				ctx,
+				`SELECT status, progress, error, completed_at FROM jobs WHERE id = ? AND workspace_id = ?`,
+				id, workspaceID,
 			).Scan(&currentStatus, &progress, &jobError, &completedAt)
 			if err != nil {
 				fmt.Fprintf(w, "event: error\ndata: {\"error\":\"%s\"}\n\n", err.Error())
@@ -359,7 +365,7 @@ func (h *Handler) SubmitJobOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var exists int
-	if err := h.DB.QueryRow(`SELECT COUNT(*) FROM jobs WHERE id = ? AND workspace_id = ?`, id, workspaceID).Scan(&exists); err != nil || exists == 0 {
+	if err := h.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM jobs WHERE id = ? AND workspace_id = ?`, id, workspaceID).Scan(&exists); err != nil || exists == 0 {
 		writeError(w, http.StatusNotFound, "job not found")
 		return
 	}

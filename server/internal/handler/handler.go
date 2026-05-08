@@ -13,6 +13,7 @@ import (
 	"github.com/tethy/mulwiki/server/internal/logbuf"
 	"github.com/tethy/mulwiki/server/internal/middleware"
 	"github.com/tethy/mulwiki/server/internal/realtime"
+	"github.com/tethy/mulwiki/server/internal/store"
 )
 
 // Handler provides HTTP handler methods with shared dependencies.
@@ -120,7 +121,5 @@ func (h *Handler) workspaceIDForRequest(r *http.Request) (string, error) {
 		return id, nil
 	}
 
-	var workspaceID string
-	err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, workspaceSlug(r)).Scan(&workspaceID)
-	return workspaceID, err
+	return store.NewWorkspaceStore(h.DB).GetIDBySlug(r.Context(), workspaceSlug(r))
 }
