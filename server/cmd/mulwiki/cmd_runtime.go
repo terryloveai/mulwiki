@@ -30,15 +30,17 @@ func init() {
 }
 
 func runRuntimeList(cmd *cobra.Command, _ []string) error {
-	serverURL := flagOrEnv(cmd, "server-url", "MULWIKI_SERVER_URL", "http://localhost:8080")
-	workspace := flagOrEnv(cmd, "workspace", "MULWIKI_WORKSPACE", "")
+	cfg, _ := loadCLIConfig()
+	serverURL := flagOrEnvConfig(cmd, "server-url", "MULWIKI_SERVER_URL", cfg.ServerURL, "http://localhost:8080")
+	workspace := flagOrEnvConfig(cmd, "workspace", "MULWIKI_WORKSPACE", cfg.WorkspaceSlug, "")
 	outputFormat, _ := cmd.Flags().GetString("output")
 
 	if workspace == "" {
-		return fmt.Errorf("workspace is required (--workspace or MULWIKI_WORKSPACE)")
+		return fmt.Errorf("workspace is required (--workspace, MULWIKI_WORKSPACE, or login config)")
 	}
 
 	client := newAPIClient(serverURL)
+	client.setSessionID(cfg.SessionID)
 
 	type runtimeItem struct {
 		ID            string `json:"id"`

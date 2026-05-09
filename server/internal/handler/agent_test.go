@@ -521,7 +521,7 @@ func TestUpdateAgentTaskPersistsMessages(t *testing.T) {
 func TestListAgentTasks(t *testing.T) {
 	h := newTestHandler(t)
 	h.DB.Exec(`INSERT INTO agents (id, workspace_id, name) VALUES ('a1', 'ws1', 'Agent')`)
-	h.DB.Exec(`INSERT INTO agent_tasks (id, agent_id, workspace_id, status) VALUES ('t1', 'a1', 'ws1', 'completed'), ('t2', 'a1', 'ws1', 'failed')`)
+	h.DB.Exec(`INSERT INTO agent_tasks (id, job_id, agent_id, workspace_id, status) VALUES ('t1', 'job-1', 'a1', 'ws1', 'completed'), ('t2', 'job-2', 'a1', 'ws1', 'failed')`)
 
 	req := chiRequest(http.MethodGet, "/api/workspaces/test-workspace/agents/a1/tasks", map[string]string{"slug": "test-workspace", "id": "a1"}, nil)
 	rr := httptest.NewRecorder()
@@ -540,6 +540,13 @@ func TestListAgentTasks(t *testing.T) {
 
 	if len(tasks) != 2 {
 		t.Errorf("expected 2 tasks, got %d", len(tasks))
+	}
+	jobsByTask := map[string]string{}
+	for _, task := range tasks {
+		jobsByTask[task.ID] = task.JobID
+	}
+	if jobsByTask["t1"] != "job-1" || jobsByTask["t2"] != "job-2" {
+		t.Fatalf("expected job ids to round-trip, got %#v", jobsByTask)
 	}
 }
 

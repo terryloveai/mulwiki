@@ -365,10 +365,7 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.DB.QueryContext(r.Context(),
-		`SELECT id, agent_id, runtime_id, workspace_id, source_path, schema_id,
-		        status, priority, parent_task_id, session_id, work_dir,
-		        failure_reason, daemon_id, dispatched_at, started_at, completed_at,
-		        result, error, attempt, max_attempts, created_at
+		`SELECT `+store.AgentTaskSelectColumns+`
 		 FROM agent_tasks WHERE agent_id = ? AND workspace_id = ? ORDER BY created_at DESC`,
 		id, workspaceID,
 	)
@@ -380,33 +377,12 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 
 	tasks := make([]protocol.AgentTask, 0)
 	for rows.Next() {
-		var t protocol.AgentTask
-		var runtimeID, dispatchedAt, startedAt, completedAt, parentTaskID sql.NullString
-		if err := rows.Scan(
-			&t.ID, &t.AgentID, &runtimeID, &t.WorkspaceID, &t.SourcePath, &t.SchemaID,
-			&t.Status, &t.Priority, &parentTaskID, &t.SessionID, &t.WorkDir,
-			&t.FailureReason, &t.DaemonID, &dispatchedAt, &startedAt, &completedAt,
-			&t.Result, &t.Error, &t.Attempt, &t.MaxAttempts, &t.CreatedAt,
-		); err != nil {
+		t, err := store.ScanAgentTask(rows.Scan)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan task")
 			return
 		}
-		if runtimeID.Valid {
-			t.RuntimeID = &runtimeID.String
-		}
-		if dispatchedAt.Valid {
-			t.DispatchedAt = &dispatchedAt.String
-		}
-		if startedAt.Valid {
-			t.StartedAt = &startedAt.String
-		}
-		if completedAt.Valid {
-			t.CompletedAt = &completedAt.String
-		}
-		if parentTaskID.Valid {
-			t.ParentTaskID = &parentTaskID.String
-		}
-		tasks = append(tasks, t)
+		tasks = append(tasks, *t)
 	}
 	if err := rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to iterate tasks")

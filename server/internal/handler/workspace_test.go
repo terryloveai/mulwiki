@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -53,6 +55,159 @@ func TestCreateWorkspace(t *testing.T) {
 	if role != "owner" {
 		t.Errorf("expected owner role, got %q", role)
 	}
+}
+
+func TestCreateWorkspace_SeedsBuiltinSchemas(t *testing.T) {
+	h := newTestHandler(t)
+	dataDir := t.TempDir()
+	h.ReposDir = filepath.Join(dataDir, "repos")
+	h.BuiltinSchemasDir = writeBuiltinSchemaFixture(t, dataDir)
+
+	body := `{"name":"Seeded Workspace","slug":"seeded-workspace"}`
+	req := chiRequest(http.MethodPost, "/api/workspaces", nil, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.CreateWorkspace(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var ws protocol.Workspace
+	if err := json.NewDecoder(rr.Body).Decode(&ws); err != nil {
+		t.Fatalf("decode workspace: %v", err)
+	}
+
+	var count int
+	if err := h.DB.QueryRow(
+		`SELECT COUNT(*) FROM schemas WHERE workspace_id = ? AND source_type = 'builtin'`,
+		ws.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count builtin schemas: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 builtin schema, got %d", count)
+	}
+	if content := h.readSchemaFromGit(ws.ID, "schemas/concept-wiki-schema.md"); !strings.Contains(content, "# Types") {
+		t.Fatalf("expected builtin schema content in workspace repo, got %q", content)
+	}
+}
+
+func TestCreateWorkspace_ActivatesSelectedBuiltinSchema(t *testing.T) {
+	h := newTestHandler(t)
+	dataDir := t.TempDir()
+	h.ReposDir = filepath.Join(dataDir, "repos")
+	h.BuiltinSchemasDir = writeBuiltinSchemaFixture(t, dataDir)
+
+	body := `{"name":"Selected Workspace","slug":"selected-workspace","initial_schema_type":"builtin","initial_schema_path":"schemas/concept-wiki-schema.md"}`
+	req := chiRequest(http.MethodPost, "/api/workspaces", nil, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.CreateWorkspace(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var ws protocol.Workspace
+	if err := json.NewDecoder(rr.Body).Decode(&ws); err != nil {
+		t.Fatalf("decode workspace: %v", err)
+	}
+
+	var activeSchemaID, activeSchemaPath, sourceType string
+	if err := h.DB.QueryRow(
+		`SELECT COALESCE(w.active_schema_id, ''), w.active_schema_path, s.source_type
+		 FROM workspaces w
+		 JOIN schemas s ON s.id = w.active_schema_id
+		 WHERE w.id = ?`,
+		ws.ID,
+	).Scan(&activeSchemaID, &activeSchemaPath, &sourceType); err != nil {
+		t.Fatalf("load active schema: %v", err)
+	}
+	if activeSchemaID == "" {
+		t.Fatal("expected active schema id to be set")
+	}
+	if activeSchemaPath != "schemas/concept-wiki-schema.md" {
+		t.Fatalf("expected active schema path to be selected builtin, got %q", activeSchemaPath)
+	}
+	if sourceType != "builtin" {
+		t.Fatalf("expected active schema source_type builtin, got %q", sourceType)
+	}
+}
+
+func TestCreateWorkspace_BlankSchemaStartsWithUserSchema(t *testing.T) {
+	h := newTestHandler(t)
+	dataDir := t.TempDir()
+	h.ReposDir = filepath.Join(dataDir, "repos")
+	h.BuiltinSchemasDir = writeBuiltinSchemaFixture(t, dataDir)
+
+	body := `{"name":"Blank Workspace","slug":"blank-workspace","initial_schema_type":"blank"}`
+	req := chiRequest(http.MethodPost, "/api/workspaces", nil, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.CreateWorkspace(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var ws protocol.Workspace
+	if err := json.NewDecoder(rr.Body).Decode(&ws); err != nil {
+		t.Fatalf("decode workspace: %v", err)
+	}
+
+	var activeSchemaPath, name, sourceType string
+	if err := h.DB.QueryRow(
+		`SELECT w.active_schema_path, s.name, s.source_type
+		 FROM workspaces w
+		 JOIN schemas s ON s.id = w.active_schema_id
+		 WHERE w.id = ?`,
+		ws.ID,
+	).Scan(&activeSchemaPath, &name, &sourceType); err != nil {
+		t.Fatalf("load blank active schema: %v", err)
+	}
+	if activeSchemaPath != "schemas/blank-schema.md" {
+		t.Fatalf("expected blank active schema path, got %q", activeSchemaPath)
+	}
+	if name != "Blank Schema" {
+		t.Fatalf("expected blank schema name, got %q", name)
+	}
+	if sourceType != "user" {
+		t.Fatalf("expected blank schema source_type user, got %q", sourceType)
+	}
+	if content := h.readSchemaFromGit(ws.ID, activeSchemaPath); !strings.Contains(content, "# Blank Schema") {
+		t.Fatalf("expected blank schema content in workspace repo, got %q", content)
+	}
+
+	var builtinCount int
+	if err := h.DB.QueryRow(
+		`SELECT COUNT(*) FROM schemas WHERE workspace_id = ? AND source_type = 'builtin'`,
+		ws.ID,
+	).Scan(&builtinCount); err != nil {
+		t.Fatalf("count builtin schemas: %v", err)
+	}
+	if builtinCount != 1 {
+		t.Fatalf("expected builtin schemas to still be seeded, got %d", builtinCount)
+	}
+}
+
+func writeBuiltinSchemaFixture(t *testing.T, dataDir string) string {
+	t.Helper()
+	builtinSchemasDir := filepath.Join(dataDir, "builtin", "schemas")
+	if err := os.MkdirAll(builtinSchemasDir, 0755); err != nil {
+		t.Fatalf("create builtin schema dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(builtinSchemasDir, "concept-wiki-schema.md"),
+		[]byte("# Types\n\n- Concept\n"),
+		0644,
+	); err != nil {
+		t.Fatalf("write builtin schema fixture: %v", err)
+	}
+	return builtinSchemasDir
 }
 
 func TestCreateWorkspace_AutoSlug(t *testing.T) {

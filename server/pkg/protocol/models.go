@@ -15,10 +15,12 @@ type Workspace struct {
 }
 
 type CreateWorkspaceRequest struct {
-	Name        string `json:"name"`
-	Slug        string `json:"slug"`
-	Description string `json:"description"`
-	GitRemote   string `json:"git_remote,omitempty"` // optional GitHub/remote URL
+	Name              string `json:"name"`
+	Slug              string `json:"slug"`
+	Description       string `json:"description"`
+	GitRemote         string `json:"git_remote,omitempty"` // optional GitHub/remote URL
+	InitialSchemaType string `json:"initial_schema_type,omitempty"`
+	InitialSchemaPath string `json:"initial_schema_path,omitempty"`
 }
 
 type UpdateWorkspaceRequest struct {

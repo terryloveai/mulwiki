@@ -11,9 +11,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/tethy/mulwiki/server/internal/auth"
 	"github.com/tethy/mulwiki/server/internal/events"
 	"github.com/tethy/mulwiki/server/internal/middleware"
 	"github.com/tethy/mulwiki/server/pkg/protocol"
+)
+
+var (
+	daemonLookPath = exec.LookPath
+	daemonCommand  = exec.Command
 )
 
 // POST /api/daemon/register — register or re-register a daemon
@@ -231,6 +239,16 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 		if _, err := h.DB.Exec(query, args...); err != nil {
 			slog.Error("daemon heartbeat: failed to update runtimes", "error", err)
 		}
+	} else {
+		query := `UPDATE agent_runtimes SET last_heartbeat = ?, status = 'online' WHERE daemon_id = ?`
+		args := []any{now, req.ID}
+		if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+			query += ` AND workspace_id = ?`
+			args = append(args, tokenWorkspaceID)
+		}
+		if _, err := h.DB.Exec(query, args...); err != nil {
+			slog.Error("daemon heartbeat: failed to update runtimes by daemon", "error", err)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -281,10 +299,33 @@ func (h *Handler) DaemonStale(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/daemon — list all registered daemons with derived status
 func (h *Handler) ListDaemons(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.DB.Query(
-		`SELECT id, hostname, pid, version, runtime_ids, max_concurrent_tasks, last_heartbeat, registered_at
-		 FROM daemon_registrations ORDER BY last_heartbeat DESC`,
-	)
+	h.listDaemons(w, r, "")
+}
+
+// GET /api/workspaces/{slug}/daemons — list daemons that have runtimes in this workspace.
+func (h *Handler) ListWorkspaceDaemons(w http.ResponseWriter, r *http.Request) {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	h.listDaemons(w, r, workspaceID)
+}
+
+func (h *Handler) listDaemons(w http.ResponseWriter, _ *http.Request, workspaceID string) {
+	query := `SELECT dr.id, dr.hostname, dr.pid, dr.version, dr.runtime_ids, dr.max_concurrent_tasks, dr.last_heartbeat, dr.registered_at
+		FROM daemon_registrations dr`
+	args := []any{}
+	if workspaceID != "" {
+		query += ` WHERE EXISTS (
+			SELECT 1 FROM agent_runtimes ar
+			WHERE ar.daemon_id = dr.id AND ar.workspace_id = ?
+		)`
+		args = append(args, workspaceID)
+	}
+	query += ` ORDER BY dr.last_heartbeat DESC`
+
+	rows, err := h.DB.Query(query, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list daemons")
 		return
@@ -315,12 +356,31 @@ func (h *Handler) ListDaemons(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"daemons": daemons})
 }
 
+func (h *Handler) daemonBelongsToWorkspace(daemonID, workspaceID string) bool {
+	if daemonID == "" || workspaceID == "" {
+		return false
+	}
+	var exists int
+	err := h.DB.QueryRow(
+		`SELECT 1 FROM agent_runtimes WHERE daemon_id = ? AND workspace_id = ? LIMIT 1`,
+		daemonID, workspaceID,
+	).Scan(&exists)
+	return err == nil && exists == 1
+}
+
 // GET /api/daemon/{id}/logs — tail daemon log
 func (h *Handler) GetDaemonLogs(w http.ResponseWriter, r *http.Request) {
 	id := idParam(r, "id")
 	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && id != ctxDaemonID {
 		writeError(w, http.StatusForbidden, "daemon id mismatch")
 		return
+	}
+	if daemonID(r) == "" {
+		workspaceID, err := h.workspaceIDForRequest(r)
+		if err != nil || workspaceID == "" || !h.daemonBelongsToWorkspace(id, workspaceID) {
+			writeError(w, http.StatusNotFound, "daemon not found")
+			return
+		}
 	}
 	n := 50
 	if nStr := r.URL.Query().Get("n"); nStr != "" {
@@ -356,6 +416,13 @@ func (h *Handler) StopDaemon(w http.ResponseWriter, r *http.Request) {
 	if ctxDaemonID := daemonID(r); ctxDaemonID != "" && id != ctxDaemonID {
 		writeError(w, http.StatusForbidden, "daemon id mismatch")
 		return
+	}
+	if daemonID(r) == "" {
+		workspaceID, err := h.workspaceIDForRequest(r)
+		if err != nil || workspaceID == "" || !h.daemonBelongsToWorkspace(id, workspaceID) {
+			writeError(w, http.StatusNotFound, "daemon not found")
+			return
+		}
 	}
 
 	var pid int
@@ -411,6 +478,9 @@ func (h *Handler) StartDaemon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Workspace == "" {
+		req.Workspace = workspaceSlug(r)
+	}
+	if req.Workspace == "" {
 		writeError(w, http.StatusBadRequest, "workspace is required")
 		return
 	}
@@ -419,7 +489,7 @@ func (h *Handler) StartDaemon(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find mulwiki binary (try common locations)
-	mulwikiPath, err := exec.LookPath("mulwiki")
+	mulwikiPath, err := daemonLookPath("mulwiki")
 	if err != nil {
 		// Fall back to known build locations
 		candidates := []string{"/tmp/mulwiki", "./bin/mulwiki", os.ExpandEnv("$HOME/.mulwiki/bin/mulwiki")}
@@ -435,11 +505,38 @@ func (h *Handler) StartDaemon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := exec.Command(mulwikiPath, "daemon", "start",
+	cmd := daemonCommand(mulwikiPath, "daemon", "start",
 		"--workspace", req.Workspace,
 		"--server-url", req.ServerURL,
 	)
-	if token := middleware.DaemonTokenFromContext(r.Context()); token != "" {
+	daemonIDArg := middleware.GetDaemonID(r)
+	token := middleware.DaemonTokenFromContext(r.Context())
+	if token == "" {
+		workspaceID, err := h.workspaceIDForRequest(r)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		daemonIDArg = uuid.New().String()
+		raw, hash, err := auth.NewDaemonToken()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create daemon token")
+			return
+		}
+		if _, err := h.DB.Exec(
+			`INSERT INTO daemon_tokens (workspace_id, daemon_id, token_hash)
+			 VALUES (?, ?, ?)`,
+			workspaceID, daemonIDArg, hash,
+		); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store daemon token")
+			return
+		}
+		token = raw
+	}
+	if daemonIDArg != "" {
+		cmd.Args = append(cmd.Args, "--daemon-id", daemonIDArg)
+	}
+	if token != "" {
 		cmd.Args = append(cmd.Args, "--daemon-token", token)
 	}
 	cmd.Stdout = os.Stdout

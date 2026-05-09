@@ -4,6 +4,7 @@ export interface Workspace {
   name: string;
   description: string;
   active_schema_id?: string;
+  active_schema_path?: string;
   created_at: string;
 }
 

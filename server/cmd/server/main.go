@@ -93,7 +93,8 @@ func main() {
 	// --- Create handler ---
 	h := handler.NewWithDeps(db, bus, hub)
 	h.ReposDir = filepath.Join(dataDir, "repos")
-	h.BuiltinSchemasDir = filepath.Join(dataDir, "builtin-schemas")
+	h.BuiltinSchemasDir = resolveBuiltinDir("BUILTIN_SCHEMAS_DIR", "builtin/schemas", "server/builtin/schemas")
+	h.BuiltinSkillsDir = resolveBuiltinDir("BUILTIN_SKILLS_DIR", "builtin/skills", "server/builtin/skills")
 	h.LogBuf = logStore
 
 	// --- Seed builtin schemas into existing workspaces ---
@@ -240,6 +241,12 @@ func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
 			r.With(middleware.RequireAdmin()).Patch("/", h.UpdateWorkspace)
 			r.With(middleware.RequireOwner()).Delete("/", h.DeleteWorkspace)
 			r.With(middleware.RequireAdmin()).Post("/daemon-tokens", h.CreateDaemonToken)
+
+			// Daemons (user-facing view scoped by workspace)
+			r.Get("/daemons", h.ListWorkspaceDaemons)
+			r.Get("/daemons/{id}/logs", h.GetDaemonLogs)
+			r.With(middleware.RequireAdmin()).Post("/daemons/{id}/stop", h.StopDaemon)
+			r.With(middleware.RequireAdmin()).Post("/daemons/start", h.StartDaemon)
 
 			// Schemas
 			r.Route("/schemas", func(r chi.Router) {
@@ -584,6 +591,21 @@ func seedBuiltinSchemas(db *sql.DB, handler *handler.Handler) error {
 	}
 
 	return nil
+}
+
+func resolveBuiltinDir(envName string, candidates ...string) string {
+	if configured := os.Getenv(envName); configured != "" {
+		return configured
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }
 
 // runStaleAgentDetector periodically marks agents as offline if they haven't

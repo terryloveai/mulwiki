@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -24,7 +25,8 @@ type Handler struct {
 	EventBus          *events.Bus
 	Realtime          *realtime.Hub
 	ReposDir          string // directory for bare git repos (e.g. "./data/repos")
-	BuiltinSchemasDir string // directory for builtin schema .md files to seed (e.g. "./data/builtin-schemas")
+	BuiltinSchemasDir string // directory for builtin schema .md files to seed (e.g. "./builtin/schemas")
+	BuiltinSkillsDir  string // directory for builtin skill definitions (e.g. "./builtin/skills")
 	LogBuf            *logbuf.Store
 }
 
@@ -44,6 +46,25 @@ func (h *Handler) reposDir() string {
 		return h.ReposDir
 	}
 	return "./data/repos"
+}
+
+func (h *Handler) builtinSchemasDir() string {
+	if h.BuiltinSchemasDir != "" {
+		return h.BuiltinSchemasDir
+	}
+	return firstExistingDir("./builtin/schemas", "server/builtin/schemas")
+}
+
+func firstExistingDir(candidates ...string) string {
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }
 
 // writeJSON serializes v as JSON and writes it to the response.

@@ -140,7 +140,6 @@ func (d *Daemon) run(ctx context.Context) error {
 		d.Agents[rt.Backend] = AgentEntry{Path: rt.Path}
 		d.setAgentVersion(rt.Backend, version)
 	}
-	d.agentVersions = make(map[string]string)
 	slog.Info("detected runtimes", "count", len(d.detected))
 
 	if err := d.register(d.detected); err != nil {

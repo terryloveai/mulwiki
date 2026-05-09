@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
-import type { Agent, AgentRuntime, AgentSkill, AgentTask, Job, SchemaWithActive, Source, Workspace } from "./types";
+import type { Agent, AgentRuntime, AgentSkill, AgentTask, Job, SchemaWithActive, Source, User, Workspace } from "./types";
 import { createQueryClient } from "./query-client";
+import { authKeys, meOptions } from "./auth/queries";
 import {
   schemaListOptions,
   sourceListOptions,
@@ -29,6 +30,7 @@ type SelectResult<T extends { select?: unknown }> = FunctionReturn<NonNullable<T
 const queryClient = createQueryClient();
 expectType<QueryClient>(queryClient);
 
+expectType<readonly ["auth", "me"]>(authKeys.me());
 expectType<readonly ["workspaces", string]>(workspaceKeys.detail("demo"));
 expectType<readonly ["workspaces", string, "agents", "list"]>(agentKeys.list("demo"));
 expectType<readonly ["workspaces", string, "agents", string]>(agentKeys.detail("demo", "agent-1"));
@@ -41,6 +43,10 @@ expectType<readonly ["workspaces", string, "wiki", string]>(workspaceKeys.wikiDe
 const workspaceDetail = workspaceDetailOptions("demo");
 expectType<readonly ["workspaces", string]>(workspaceDetail.queryKey);
 expectType<Workspace>({} as QueryFnResult<typeof workspaceDetail>);
+
+const me = meOptions();
+expectType<readonly ["auth", "me"]>(me.queryKey);
+expectType<User>({} as QueryFnResult<typeof me>);
 
 const sources = sourceListOptions("demo");
 expectType<readonly ["workspaces", string, "sources", "list"]>(sources.queryKey);

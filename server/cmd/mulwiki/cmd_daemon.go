@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +60,7 @@ func init() {
 	f.String("server-url", "", "Mulwiki server URL (env: MULWIKI_SERVER_URL)")
 	f.String("workspace", "", "Workspace slug to watch (env: MULWIKI_WORKSPACE)")
 	f.String("repos-path", "", "Path to bare git repos (env: MULWIKI_REPOS_PATH)")
+	f.String("daemon-id", "", "Daemon identity (normally auto-generated)")
 	f.String("daemon-token", "", "Daemon token (env: MULWIKI_DAEMON_TOKEN, file: ~/.mulwiki/daemon/token)")
 
 	daemonLogsCmd.Flags().BoolP("follow", "f", false, "Follow log output")
@@ -134,19 +136,7 @@ func runDaemonBackground(cmd *cobra.Command) error {
 	}
 
 	// Build child args: daemon start --foreground + forwarded flags.
-	args := []string{"daemon", "start", "--foreground"}
-	if v, _ := cmd.Flags().GetString("server-url"); v != "" {
-		args = append(args, "--server-url", v)
-	}
-	if v, _ := cmd.Flags().GetString("workspace"); v != "" {
-		args = append(args, "--workspace", v)
-	}
-	if v, _ := cmd.Flags().GetString("repos-path"); v != "" {
-		args = append(args, "--repos-path", v)
-	}
-	if v, _ := cmd.Flags().GetString("daemon-token"); v != "" {
-		args = append(args, "--daemon-token", v)
-	}
+	args := buildDaemonStartArgs(cmd)
 
 	// Ensure daemon directory exists.
 	if err := os.MkdirAll(daemonDir(), 0o755); err != nil {
@@ -161,10 +151,22 @@ func runDaemonBackground(cmd *cobra.Command) error {
 	child := exec.Command(exePath, args...)
 	child.Stdout = logFile
 	child.Stderr = logFile
+	child.SysProcAttr = daemonSysProcAttr(true)
 
 	if err := child.Start(); err != nil {
-		logFile.Close()
-		return fmt.Errorf("start daemon: %w", err)
+		if isAccessDeniedSpawnErr(err) {
+			child = exec.Command(exePath, args...)
+			child.Stdout = logFile
+			child.Stderr = logFile
+			child.SysProcAttr = daemonSysProcAttr(false)
+			if err := child.Start(); err != nil {
+				logFile.Close()
+				return fmt.Errorf("start daemon (no breakaway): %w", err)
+			}
+		} else {
+			logFile.Close()
+			return fmt.Errorf("start daemon: %w", err)
+		}
 	}
 	logFile.Close()
 
@@ -200,18 +202,50 @@ func runDaemonBackground(cmd *cobra.Command) error {
 	return nil
 }
 
+func buildDaemonStartArgs(cmd *cobra.Command) []string {
+	args := []string{"daemon", "start", "--foreground"}
+	if v, _ := cmd.Flags().GetString("server-url"); v != "" {
+		args = append(args, "--server-url", v)
+	}
+	if v, _ := cmd.Flags().GetString("workspace"); v != "" {
+		args = append(args, "--workspace", v)
+	}
+	if v, _ := cmd.Flags().GetString("repos-path"); v != "" {
+		args = append(args, "--repos-path", v)
+	}
+	if v, _ := cmd.Flags().GetString("daemon-id"); v != "" {
+		args = append(args, "--daemon-id", v)
+	}
+	if v, _ := cmd.Flags().GetString("daemon-token"); v != "" {
+		args = append(args, "--daemon-token", v)
+	}
+	return args
+}
+
 func runDaemonForeground(cmd *cobra.Command) error {
+	cliCfg, _ := loadCLIConfig()
+
 	serverURL, _ := cmd.Flags().GetString("server-url")
 	if serverURL == "" {
 		serverURL = os.Getenv("MULWIKI_SERVER_URL")
 	}
 	if serverURL == "" {
+		serverURL = cliCfg.ServerURL
+	}
+	if serverURL == "" {
 		serverURL = "http://localhost:8080"
 	}
+	serverURL = strings.TrimRight(serverURL, "/")
 
 	workspaceSlug, _ := cmd.Flags().GetString("workspace")
 	if workspaceSlug == "" {
 		workspaceSlug = os.Getenv("MULWIKI_WORKSPACE")
+	}
+	if workspaceSlug == "" {
+		workspaceSlug = cliCfg.WorkspaceSlug
+	}
+	if workspaceSlug == "" {
+		return fmt.Errorf("workspace is required: pass --workspace, set MULWIKI_WORKSPACE, or run 'mulwiki login --workspace <slug>'")
 	}
 
 	// Build configuration.
@@ -224,17 +258,21 @@ func runDaemonForeground(cmd *cobra.Command) error {
 		reposPath = filepath.Join(os.Getenv("HOME"), "Documents/DevCode/github/mulwiki/server/data/repos")
 	}
 
-	daemonID, err := daemon.LoadOrCreateDaemonID(daemonIDPath())
-	if err != nil {
-		return fmt.Errorf("load daemon id: %w", err)
+	daemonID, _ := cmd.Flags().GetString("daemon-id")
+	if daemonID == "" {
+		var err error
+		daemonID, err = daemon.LoadOrCreateDaemonID(daemonIDPath())
+		if err != nil {
+			return fmt.Errorf("load daemon id: %w", err)
+		}
 	}
 	tokenFlag, _ := cmd.Flags().GetString("daemon-token")
-	daemonToken, err := resolveDaemonToken(tokenFlag, daemonTokenPath())
+	daemonToken, err := resolveDaemonTokenForStart(tokenFlag, daemonTokenPath(), cliCfg, workspaceSlug, daemonID, serverURL)
 	if err != nil {
 		return fmt.Errorf("resolve daemon token: %w", err)
 	}
 	if daemonToken == "" {
-		return fmt.Errorf("daemon token is required: pass --daemon-token, set MULWIKI_DAEMON_TOKEN, or write %s", daemonTokenPath())
+		return fmt.Errorf("not authenticated for daemon start: run 'mulwiki login --workspace %s' or pass --daemon-token", workspaceSlug)
 	}
 
 	cfg := daemon.Config{
@@ -274,6 +312,63 @@ func resolveDaemonToken(flagValue, tokenPath string) (string, error) {
 		return "", nil
 	}
 	return "", err
+}
+
+func resolveDaemonTokenForStart(flagValue, tokenPath string, cfg CLIConfig, workspaceSlug, daemonID, serverURL string) (string, error) {
+	token, err := resolveDaemonToken(flagValue, tokenPath)
+	if err != nil || token != "" {
+		return token, err
+	}
+	if cfg.DaemonTokens != nil {
+		if token := strings.TrimSpace(cfg.DaemonTokens[workspaceSlug]); token != "" {
+			return token, nil
+		}
+	}
+	if cfg.SessionID == "" {
+		return "", nil
+	}
+
+	token, err = mintDaemonToken(serverURL, cfg.SessionID, workspaceSlug, daemonID)
+	if err != nil {
+		return "", err
+	}
+	if token == "" {
+		return "", nil
+	}
+
+	latest, err := loadCLIConfig()
+	if err != nil {
+		return "", err
+	}
+	if latest.DaemonTokens == nil {
+		latest.DaemonTokens = map[string]string{}
+	}
+	latest.ServerURL = serverURL
+	latest.WorkspaceSlug = workspaceSlug
+	latest.SessionID = cfg.SessionID
+	latest.DaemonTokens[workspaceSlug] = token
+	if err := saveCLIConfig(latest); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func mintDaemonToken(serverURL, sessionID, workspaceSlug, daemonID string) (string, error) {
+	client := newAPIClient(serverURL)
+	client.setSessionID(sessionID)
+
+	var resp struct {
+		Token string `json:"token"`
+	}
+	_, err := client.post(
+		fmt.Sprintf("/api/workspaces/%s/daemon-tokens", url.PathEscape(workspaceSlug)),
+		map[string]string{"daemon_id": daemonID},
+		&resp,
+	)
+	if err != nil {
+		return "", fmt.Errorf("create daemon token: %w", err)
+	}
+	return strings.TrimSpace(resp.Token), nil
 }
 
 // signalContext returns a context that cancels on SIGINT or SIGTERM.

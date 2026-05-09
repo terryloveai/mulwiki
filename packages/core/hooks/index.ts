@@ -24,21 +24,21 @@ import type {
 
 /* ── Daemon ── */
 
-export function useDaemons() {
+export function useDaemons(ws: string) {
   return useQuery({
-    queryKey: ["daemons"],
-    queryFn: () => api.listDaemons(),
+    queryKey: ["daemons", ws],
+    queryFn: () => api.listDaemons(ws),
     select: (data) => data.daemons,
     refetchInterval: 10_000,
   });
 }
 
-export function useStopDaemon() {
+export function useStopDaemon(ws: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => api.stopDaemon(id),
+    mutationFn: (id: string) => api.stopDaemon(ws, id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["daemons"] });
+      qc.invalidateQueries({ queryKey: ["daemons", ws] });
     },
   });
 }
@@ -48,16 +48,16 @@ export function useStartDaemon(ws: string) {
   return useMutation({
     mutationFn: (opts?: { serverUrl?: string }) => api.startDaemon(ws, opts?.serverUrl),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["daemons"] });
+      qc.invalidateQueries({ queryKey: ["daemons", ws] });
       qc.invalidateQueries({ queryKey: agentKeys.runtimes(ws) });
     },
   });
 }
 
-export function useDaemonLogs(id: string | null) {
+export function useDaemonLogs(ws: string, id: string | null) {
   return useQuery({
-    queryKey: ["daemons", id, "logs"],
-    queryFn: () => api.getDaemonLogs(id!, 50),
+    queryKey: ["daemons", ws, id, "logs"],
+    queryFn: () => api.getDaemonLogs(ws, id!, 50),
     enabled: !!id,
     refetchInterval: 5_000,
   });

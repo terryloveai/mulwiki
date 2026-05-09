@@ -17,30 +17,30 @@ export function WorkspacesView() {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
-  const [selectedSchemaId, setSelectedSchemaId] = useState("");
+  const [schemaMode, setSchemaMode] = useState<"blank" | "builtin">("blank");
+  const [selectedSchemaPath, setSelectedSchemaPath] = useState("");
 
   const { data: workspaces, isLoading } = useQuery(workspaceQueries.list());
   const { data: builtinSchemas } = useQuery(schemaQueries.builtin());
+  const canSubmit =
+    name.trim() !== "" &&
+    slug.trim() !== "" &&
+    (schemaMode === "blank" || selectedSchemaPath !== "");
 
   const createMutation = useMutation({
-    mutationFn: async () => {
-      const selectedSchema = builtinSchemas?.find((schema) => schema.id === selectedSchemaId);
-      if (!selectedSchema) throw new Error("Select a schema");
-      const workspace = await api.createWorkspace({ name, slug });
-      await api.createSchema(workspace.slug, {
-        name: selectedSchema.name,
-        description: selectedSchema.description,
-        version: selectedSchema.version,
-        content: selectedSchema.content,
-        source_type: "user",
-      });
-      return workspace;
-    },
+    mutationFn: () =>
+      api.createWorkspace({
+        name: name.trim(),
+        slug: slug.trim(),
+        initial_schema_type: schemaMode,
+        initial_schema_path: schemaMode === "builtin" ? selectedSchemaPath : undefined,
+      }),
     onSuccess: (workspace) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.workspaces() });
       setName("");
       setSlug("");
-      setSelectedSchemaId("");
+      setSchemaMode("blank");
+      setSelectedSchemaPath("");
       setShowForm(false);
       router.push(`/${workspace.slug}/wiki`);
     },
@@ -48,7 +48,7 @@ export function WorkspacesView() {
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!name.trim() || !slug.trim() || !selectedSchemaId) return;
+    if (!canSubmit) return;
     createMutation.mutate();
   };
 
@@ -101,35 +101,54 @@ export function WorkspacesView() {
           <div className="mt-4 space-y-2">
             <div className="text-sm font-medium text-foreground">Schema</div>
             <div className="grid gap-2">
+              <label
+                className={cn(
+                  "flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors",
+                  schemaMode === "blank" ? "bg-accent text-accent-foreground" : "hover:bg-accent/60",
+                )}
+              >
+                <input
+                  type="radio"
+                  name="initial-schema"
+                  className="mt-1"
+                  checked={schemaMode === "blank"}
+                  onChange={() => setSchemaMode("blank")}
+                />
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium text-foreground">Blank schema</span>
+                  <span className="block truncate text-xs text-muted-foreground">Start with an empty schema.</span>
+                </span>
+              </label>
               {builtinSchemas?.map((schema) => (
                 <label
-                  key={schema.id}
+                  key={schema.path}
                   className={cn(
                     "flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors",
-                    selectedSchemaId === schema.id
+                    schemaMode === "builtin" && selectedSchemaPath === schema.path
                       ? "bg-accent text-accent-foreground"
                       : "hover:bg-accent/60",
                   )}
                 >
                   <input
                     type="radio"
-                    name="schema"
+                    name="initial-schema"
                     className="mt-1"
-                    checked={selectedSchemaId === schema.id}
-                    onChange={() => setSelectedSchemaId(schema.id)}
+                    checked={schemaMode === "builtin" && selectedSchemaPath === schema.path}
+                    onChange={() => {
+                      setSchemaMode("builtin");
+                      setSelectedSchemaPath(schema.path);
+                    }}
                   />
                   <span className="min-w-0">
                     <span className="block text-sm font-medium text-foreground">{schema.name}</span>
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {schema.description}
-                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">{schema.path}</span>
                   </span>
                 </label>
               ))}
             </div>
           </div>
           <div className="mt-4 flex justify-end">
-            <Button type="submit" variant="brand" disabled={createMutation.isPending || !selectedSchemaId}>
+            <Button type="submit" variant="brand" disabled={createMutation.isPending || !canSubmit}>
               {createMutation.isPending ? <Spinner className="h-4 w-4" /> : "Create"}
             </Button>
           </div>

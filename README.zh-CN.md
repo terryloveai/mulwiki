@@ -111,6 +111,32 @@ cd server && go run ./cmd/server
 cd apps/web && pnpm dev
 ```
 
+### CLI 和 Daemon
+
+在 Web UI 中创建用户和 workspace 后，可以配置 CLI、登录并启动本地 runtime daemon：
+
+```bash
+cd server
+
+# 一条命令完成 self-host 配置。未传 email/password 时会提示输入。
+go run ./cmd/mulwiki setup self-host \
+  --server-url http://localhost:8080 \
+  --workspace demo
+
+# 也可以分步执行。
+go run ./cmd/mulwiki login \
+  --server-url http://localhost:8080 \
+  --workspace demo
+
+go run ./cmd/mulwiki daemon start
+go run ./cmd/mulwiki daemon status
+go run ./cmd/mulwiki runtime list
+```
+
+CLI 会把 session 存到 `~/.mulwiki/config.json`。daemon 启动时会用该 session
+自动签发并缓存当前 workspace 的 daemon token，然后向 server 注册检测到的 agent
+runtimes。
+
 ### 构建
 
 ```bash
@@ -135,6 +161,7 @@ mulwiki/
 ├── server/
 │   ├── cmd/server/    HTTP 服务器（chi 路由器）
 │   ├── cmd/mulwiki/   CLI（daemon 子命令）
+│   ├── builtin/       随 server 发布的内置 Schema 和 Skill
 │   ├── internal/
 │   │   ├── handler/   HTTP 处理器
 │   │   ├── daemon/    守护进程循环 + agent 任务执行
@@ -145,7 +172,6 @@ mulwiki/
 │   └── pkg/
 │       ├── db/         SQL 模式
 │       └── protocol/   共享类型
-├── schemas/           内置 Schema 定义（Markdown）
 ├── scripts/           开发辅助工具
 ├── LICENSE            MIT 许可证
 ├── Makefile           构建自动化
@@ -216,13 +242,15 @@ NEXT_PUBLIC_API_URL=http://localhost:8080
 
 ### 内置 Schema
 
-位于 `server/data/builtin-schemas/`：
+位于 `server/builtin/schemas/`：
 - `concept-wiki-schema.md` - 严格的 9 种类型层次结构
 - `karpathy-llm-wiki-schema.md` - 松散的自由链接结构
 - `nashsu-llm-wiki-schema.md` - 7 种类型知识图谱
 - `llm-knowledge-base-schema.md` - 最小 3 种类型系统
 - `paper-spec-wiki-schema.md` - 学术 7 种类型结构
 - `paper-spec-paper-schema.md` - 论文级 YAML 结构化剖面
+
+内置 Skill 位于 `server/builtin/skills/`。它们是 catalog 模板，仅在需要时安装或 fork 到 workspace。
 
 ## 📖 API 路由
 

@@ -42,6 +42,22 @@ func CleanSlug(raw string) string {
 	return s
 }
 
+func (h *Handler) loadWorkspaceActiveSchema(ws *protocol.Workspace) {
+	var activeSchemaID, activeSchemaPath string
+	if err := h.DB.QueryRow(
+		`SELECT COALESCE(active_schema_id, ''), active_schema_path FROM workspaces WHERE id = ?`,
+		ws.ID,
+	).Scan(&activeSchemaID, &activeSchemaPath); err != nil {
+		return
+	}
+	if activeSchemaID != "" {
+		ws.ActiveSchemaID = &activeSchemaID
+	}
+	if activeSchemaPath != "" {
+		ws.ActiveSchemaPath = &activeSchemaPath
+	}
+}
+
 // POST /api/workspaces
 func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	currentUserID := userID(r)
@@ -65,6 +81,26 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	if !isValidSlug(slug) {
 		writeError(w, http.StatusBadRequest, "invalid slug")
+		return
+	}
+
+	initialSchemaType := strings.TrimSpace(req.InitialSchemaType)
+	initialSchemaPath := ""
+	if initialSchemaType == "" && strings.TrimSpace(req.InitialSchemaPath) != "" {
+		initialSchemaType = initialSchemaTypeBuiltin
+	}
+	switch initialSchemaType {
+	case "":
+	case initialSchemaTypeBlank:
+	case initialSchemaTypeBuiltin:
+		path, ok := builtinSchemaWorkspacePath(req.InitialSchemaPath)
+		if !ok || !h.hasBuiltinSchema(path) {
+			writeError(w, http.StatusBadRequest, "invalid initial schema")
+			return
+		}
+		initialSchemaPath = path
+	default:
+		writeError(w, http.StatusBadRequest, "invalid initial schema type")
 		return
 	}
 
@@ -116,8 +152,30 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	// Seed builtin schemas into the workspace repo.
 	if err := h.SeedBuiltinSchemas(ws.ID); err != nil {
 		slog.Warn("failed to seed builtin schemas", "slug", slug, "error", err)
-		// Non-fatal: workspace is still usable.
+		if initialSchemaType == initialSchemaTypeBuiltin {
+			h.DB.Exec(`DELETE FROM workspaces WHERE id = ?`, ws.ID)
+			writeError(w, http.StatusInternalServerError, "failed to initialize workspace schema")
+			return
+		}
 	}
+
+	switch initialSchemaType {
+	case initialSchemaTypeBuiltin:
+		if err := h.activateSchemaByPath(ws.ID, initialSchemaPath); err != nil {
+			slog.Error("failed to activate initial schema", "slug", slug, "schema_path", initialSchemaPath, "error", err)
+			h.DB.Exec(`DELETE FROM workspaces WHERE id = ?`, ws.ID)
+			writeError(w, http.StatusInternalServerError, "failed to initialize workspace schema")
+			return
+		}
+	case initialSchemaTypeBlank:
+		if err := h.createBlankSchema(ws.ID); err != nil {
+			slog.Error("failed to create blank schema", "slug", slug, "error", err)
+			h.DB.Exec(`DELETE FROM workspaces WHERE id = ?`, ws.ID)
+			writeError(w, http.StatusInternalServerError, "failed to initialize workspace schema")
+			return
+		}
+	}
+	h.loadWorkspaceActiveSchema(&ws)
 
 	writeJSON(w, http.StatusCreated, ws)
 }
@@ -162,14 +220,18 @@ func (h *Handler) GetWorkspace(w http.ResponseWriter, r *http.Request) {
 
 	var ws protocol.Workspace
 	var activeSchemaID *string
+	var activeSchemaPath string
 	err := h.DB.QueryRow(
-		`SELECT id, slug, name, description, active_schema_id, created_at FROM workspaces WHERE slug = ?`, slug,
-	).Scan(&ws.ID, &ws.Slug, &ws.Name, &ws.Description, &activeSchemaID, &ws.CreatedAt)
+		`SELECT id, slug, name, description, active_schema_id, active_schema_path, created_at FROM workspaces WHERE slug = ?`, slug,
+	).Scan(&ws.ID, &ws.Slug, &ws.Name, &ws.Description, &activeSchemaID, &activeSchemaPath, &ws.CreatedAt)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 	ws.ActiveSchemaID = activeSchemaID
+	if activeSchemaPath != "" {
+		ws.ActiveSchemaPath = &activeSchemaPath
+	}
 
 	writeJSON(w, http.StatusOK, ws)
 }

@@ -1,14 +1,18 @@
 import { queryOptions } from "@tanstack/react-query";
+import { authKeys, meOptions } from "../auth/queries";
 import { schemaListOptions, workspaceDetailOptions, workspaceKeys, workspaceListOptions } from "../workspace/queries";
 import { agentKeys } from "../agents/queries";
 import { jobKeys } from "../jobs/queries";
 import { api } from "./index";
 
+export * from "../auth/queries";
 export * from "../workspace/queries";
 export * from "../agents/queries";
 export * from "../jobs/queries";
 
 export const queryKeys = {
+  auth: authKeys.all,
+  me: authKeys.me,
   workspaces: workspaceKeys.all,
   workspace: workspaceKeys.detail,
   builtinSchemas: () => ["schemas", "builtin"] as const,
@@ -28,6 +32,10 @@ export const queryKeys = {
 export const workspaceQueries = {
   list: workspaceListOptions,
   detail: workspaceDetailOptions,
+};
+
+export const authQueries = {
+  me: meOptions,
 };
 
 export const schemaQueries = {

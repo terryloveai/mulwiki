@@ -1,0 +1,7 @@
+{
+  "id": "document-parse",
+  "name": "Document Parse",
+  "description": "Extract text and structure from source documents before wiki ingestion.",
+  "version": "1.0.0",
+  "entry": "SKILL.md"
+}

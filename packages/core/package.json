@@ -10,6 +10,7 @@
     "./types": "./types/index.ts",
     "./api": "./api/index.ts",
     "./queries": "./api/queries.ts",
+    "./auth/queries": "./auth/queries.ts",
     "./hooks": "./hooks/index.ts",
     "./query-client": "./query-client.ts",
     "./realtime/ws-client": "./realtime/ws-client.ts",

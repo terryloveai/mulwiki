@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +84,59 @@ func TestNewDaemonRequestUsesConfiguredDaemonToken(t *testing.T) {
 	}
 	if got := req.Header.Get("X-Daemon-ID"); got != "daemon-1" {
 		t.Fatalf("expected X-Daemon-ID daemon-1, got %q", got)
+	}
+}
+
+func TestRunKeepsDetectedAgentVersions(t *testing.T) {
+	binDir := t.TempDir()
+	fakeCLI := filepath.Join(binDir, "fake-codex")
+	if runtime.GOOS == "windows" {
+		fakeCLI += ".bat"
+		if err := os.WriteFile(fakeCLI, []byte("@echo codex-test 1.0\r\n"), 0o755); err != nil {
+			t.Fatalf("write fake CLI: %v", err)
+		}
+	} else if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\necho codex-test 1.0\n"), 0o755); err != nil {
+		t.Fatalf("write fake CLI: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	originalKnownAgents := knownAgents
+	knownAgents = map[string]struct{ exe, display string }{
+		"codex": {filepath.Base(fakeCLI), "Codex"},
+	}
+	t.Cleanup(func() { knownAgents = originalKnownAgents })
+
+	srv, mux := setupMockServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mux.HandleFunc("/api/daemon/register", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protocol.DaemonRegistration{
+			ID:         "daemon-1",
+			RuntimeIDs: []string{"rt-1"},
+		})
+	})
+	mux.HandleFunc("/api/daemon/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	d := New(Config{
+		ServerURL:     srv.URL,
+		WorkspaceSlug: "test",
+		DaemonID:      "daemon-1",
+		WorkDir:       t.TempDir(),
+	})
+	err := d.RunContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if got := d.agentVersion("codex"); got != "codex-test 1.0" {
+		t.Fatalf("agent version = %q, want detected version", got)
 	}
 }
 
