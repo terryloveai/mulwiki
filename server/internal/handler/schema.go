@@ -239,22 +239,38 @@ func (h *Handler) UpdateSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args = append(args, id, workspaceID)
-	query := fmt.Sprintf(
-		`UPDATE schemas SET %s WHERE id = ? AND workspace_id = ?
-		 RETURNING id, workspace_id, name, description, version, path,
-		           source_type, COALESCE(derived_from, '') as derived_from, created_at`,
-		strings.Join(setClauses, ", "),
-	)
-
 	var s protocol.Schema
-	err := h.DB.QueryRow(query, args...).Scan(
-		&s.ID, &s.WorkspaceID, &s.Name, &s.Description, &s.Version, &s.Path,
-		&s.SourceType, &s.DerivedFrom, &s.CreatedAt,
-	)
+	var derivedFrom string
+	var err error
+	if len(setClauses) > 0 {
+		args = append(args, id, workspaceID)
+		query := fmt.Sprintf(
+			`UPDATE schemas SET %s WHERE id = ? AND workspace_id = ?
+			 RETURNING id, workspace_id, name, description, version, path,
+			           source_type, COALESCE(derived_from, '') as derived_from, created_at`,
+			strings.Join(setClauses, ", "),
+		)
+		err = h.DB.QueryRow(query, args...).Scan(
+			&s.ID, &s.WorkspaceID, &s.Name, &s.Description, &s.Version, &s.Path,
+			&s.SourceType, &derivedFrom, &s.CreatedAt,
+		)
+	} else {
+		err = h.DB.QueryRow(
+			`SELECT id, workspace_id, name, description, version, path,
+			        source_type, COALESCE(derived_from, '') as derived_from, created_at
+			 FROM schemas WHERE id = ? AND workspace_id = ?`,
+			id, workspaceID,
+		).Scan(
+			&s.ID, &s.WorkspaceID, &s.Name, &s.Description, &s.Version, &s.Path,
+			&s.SourceType, &derivedFrom, &s.CreatedAt,
+		)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update schema")
 		return
+	}
+	if derivedFrom != "" {
+		s.DerivedFrom = &derivedFrom
 	}
 
 	if s.Path != "" {
@@ -460,31 +476,10 @@ func (h *Handler) ValidateSchema(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/schemas/builtin
 func (h *Handler) ListBuiltinSchemas(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.DB.Query(`
-		SELECT id, workspace_id, name, description, version, path, source_type,
-		       COALESCE(derived_from, '') as derived_from, created_at
-		FROM schemas WHERE source_type = 'builtin'
-		GROUP BY path
-		ORDER BY name ASC
-	`)
+	schemas, err := h.loadBuiltinSchemaCatalog()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list builtin schemas")
 		return
-	}
-	defer rows.Close()
-
-	schemas := make([]protocol.Schema, 0)
-	for rows.Next() {
-		var s protocol.Schema
-		var derivedFrom string
-		if err := rows.Scan(&s.ID, &s.WorkspaceID, &s.Name, &s.Description, &s.Version, &s.Path, &s.SourceType, &derivedFrom, &s.CreatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to scan schema")
-			return
-		}
-		if derivedFrom != "" {
-			s.DerivedFrom = &derivedFrom
-		}
-		schemas = append(schemas, s)
 	}
 
 	writeJSON(w, http.StatusOK, schemas)
@@ -528,20 +523,106 @@ func (h *Handler) readSchemaFromGit(workspaceID, gitPath string) string {
 // builtinSchemaMeta maps schema filenames to display names.
 var builtinSchemaMeta = map[string]string{
 	"karpathy-llm-wiki-schema.md":  "Karpathy 原始",
-	"concept-wiki-schema.md":        "concept-wiki (9层本体)",
-	"nashsu-llm-wiki-schema.md":     "nashsu (CoT + 知识图谱)",
-	"llm-knowledge-base-schema.md":  "llm-knowledge-base (极简3类)",
-	"paper-spec-wiki-schema.md":     "paper-spec wiki (学术7类)",
-	"paper-spec-paper-schema.md":    "paper-spec paper (论文剖面)",
+	"concept-wiki-schema.md":       "concept-wiki (9层本体)",
+	"nashsu-llm-wiki-schema.md":    "nashsu (CoT + 知识图谱)",
+	"llm-knowledge-base-schema.md": "llm-knowledge-base (极简3类)",
+	"paper-spec-wiki-schema.md":    "paper-spec wiki (学术7类)",
+	"paper-spec-paper-schema.md":   "paper-spec paper (论文剖面)",
+}
+
+const (
+	initialSchemaTypeBlank   = "blank"
+	initialSchemaTypeBuiltin = "builtin"
+	blankSchemaPath          = "schemas/blank-schema.md"
+)
+
+const blankSchemaContent = `# Blank Schema
+
+## Types
+
+## Structure
+
+## Frontmatter
+
+## Ingest Pipeline
+
+## Lint Rules
+`
+
+func (h *Handler) loadBuiltinSchemaCatalog() ([]protocol.Schema, error) {
+	dir := h.builtinSchemasDir()
+	if dir == "" {
+		return []protocol.Schema{}, nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []protocol.Schema{}, nil
+		}
+		return nil, fmt.Errorf("read builtin schemas dir: %w", err)
+	}
+
+	schemas := make([]protocol.Schema, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+
+		content, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read builtin schema %s: %w", entry.Name(), err)
+		}
+
+		name := entry.Name()
+		if label, ok := builtinSchemaMeta[entry.Name()]; ok {
+			name = label
+		}
+
+		schemas = append(schemas, protocol.Schema{
+			ID:          entry.Name(),
+			WorkspaceID: "builtin",
+			Name:        name,
+			Description: "",
+			Version:     "1.0",
+			Path:        "schemas/" + entry.Name(),
+			Content:     string(content),
+			SourceType:  "builtin",
+		})
+	}
+
+	return schemas, nil
+}
+
+func builtinSchemaWorkspacePath(raw string) (string, bool) {
+	name := strings.TrimSpace(raw)
+	name = strings.TrimPrefix(name, "schemas/")
+	if name == "" || strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, ".md") {
+		return "", false
+	}
+	return "schemas/" + name, true
+}
+
+func builtinSchemaFilename(workspacePath string) (string, bool) {
+	path, ok := builtinSchemaWorkspacePath(workspacePath)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimPrefix(path, "schemas/"), true
+}
+
+func (h *Handler) hasBuiltinSchema(workspacePath string) bool {
+	filename, ok := builtinSchemaFilename(workspacePath)
+	if !ok {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(h.builtinSchemasDir(), filename))
+	return err == nil && !info.IsDir()
 }
 
 // SeedBuiltinSchemas writes all builtin schema .md files into the workspace git repo
 // and inserts corresponding DB records. Idempotent — skips if already seeded.
 func (h *Handler) SeedBuiltinSchemas(workspaceID string) error {
-	if h.BuiltinSchemasDir == "" {
-		return nil
-	}
-
 	// Check if already seeded.
 	var count int
 	if err := h.DB.QueryRow(
@@ -559,42 +640,67 @@ func (h *Handler) SeedBuiltinSchemas(workspaceID string) error {
 		return fmt.Errorf("open repo: %w", err)
 	}
 
-	entries, err := os.ReadDir(h.BuiltinSchemasDir)
+	schemas, err := h.loadBuiltinSchemaCatalog()
 	if err != nil {
-		return fmt.Errorf("read builtin schemas dir: %w", err)
+		return err
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+	for _, schema := range schemas {
+		if _, err := repo.WriteFile(schema.Path, []byte(schema.Content), fmt.Sprintf("seed builtin schema: %s", schema.ID)); err != nil {
+			slog.Warn("write builtin schema to git", "file", schema.ID, "error", err)
 			continue
-		}
-
-		content, err := os.ReadFile(filepath.Join(h.BuiltinSchemasDir, entry.Name()))
-		if err != nil {
-			slog.Warn("read builtin schema", "file", entry.Name(), "error", err)
-			continue
-		}
-
-		gitPath := "schemas/" + entry.Name()
-		if _, err := repo.WriteFile(gitPath, content, fmt.Sprintf("seed builtin schema: %s", entry.Name())); err != nil {
-			slog.Warn("write builtin schema to git", "file", entry.Name(), "error", err)
-			continue
-		}
-
-		name := entry.Name()
-		if label, ok := builtinSchemaMeta[entry.Name()]; ok {
-			name = label
 		}
 
 		if _, err := h.DB.Exec(
 			`INSERT INTO schemas (workspace_id, name, description, version, path, source_type)
 			 VALUES (?, ?, '', '1.0', ?, 'builtin')`,
-			workspaceID, name, gitPath,
+			workspaceID, schema.Name, schema.Path,
 		); err != nil {
-			slog.Warn("insert builtin schema record", "file", entry.Name(), "error", err)
+			slog.Warn("insert builtin schema record", "file", schema.ID, "error", err)
 		}
 	}
 
+	return nil
+}
+
+func (h *Handler) activateSchemaByPath(workspaceID, schemaPath string) error {
+	var schemaID string
+	if err := h.DB.QueryRow(
+		`SELECT id FROM schemas WHERE workspace_id = ? AND path = ?`,
+		workspaceID, schemaPath,
+	).Scan(&schemaID); err != nil {
+		return fmt.Errorf("find schema by path: %w", err)
+	}
+	if _, err := h.DB.Exec(
+		`UPDATE workspaces SET active_schema_id = ?, active_schema_path = ? WHERE id = ?`,
+		schemaID, schemaPath, workspaceID,
+	); err != nil {
+		return fmt.Errorf("activate schema: %w", err)
+	}
+	return nil
+}
+
+func (h *Handler) createBlankSchema(workspaceID string) error {
+	if _, err := h.writeSchemaToGit(workspaceID, blankSchemaPath, blankSchemaContent, "create blank schema"); err != nil {
+		return err
+	}
+
+	var schemaID string
+	if err := h.DB.QueryRow(
+		`INSERT INTO schemas (workspace_id, name, description, version, path, source_type)
+		 VALUES (?, 'Blank Schema', '', '1.0', ?, 'user')
+		 RETURNING id`,
+		workspaceID, blankSchemaPath,
+	).Scan(&schemaID); err != nil {
+		return fmt.Errorf("insert blank schema: %w", err)
+	}
+
+	if _, err := h.DB.Exec(
+		`UPDATE workspaces SET active_schema_id = ?, active_schema_path = ? WHERE id = ?`,
+		schemaID, blankSchemaPath, workspaceID,
+	); err != nil {
+		return fmt.Errorf("activate blank schema: %w", err)
+	}
 	return nil
 }
 

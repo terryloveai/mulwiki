@@ -10,15 +10,13 @@ import (
 
 // GET /api/workspaces/{slug}/agents/skills
 func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
-
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 
-	rows, err := h.DB.Query(
+	rows, err := h.DB.QueryContext(r.Context(),
 		`SELECT id, workspace_id, name, description, created_at
 		 FROM agent_skills WHERE workspace_id = ? ORDER BY created_at DESC`, workspaceID,
 	)
@@ -37,16 +35,18 @@ func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
 		}
 		skills = append(skills, sk)
 	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to iterate skills")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"skills": skills})
 }
 
 // POST /api/workspaces/{slug}/agents/skills
 func (h *Handler) CreateSkill(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
-
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
@@ -63,7 +63,7 @@ func (h *Handler) CreateSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var sk protocol.AgentSkill
-	err := h.DB.QueryRow(
+	err = h.DB.QueryRowContext(r.Context(),
 		`INSERT INTO agent_skills (workspace_id, name, description, created_at)
 		 VALUES (?, ?, ?, ?)
 		 RETURNING id, workspace_id, name, description, created_at`,
@@ -79,8 +79,13 @@ func (h *Handler) CreateSkill(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /api/workspaces/{slug}/agents/skills/{id}
 func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
+
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
 
 	var req protocol.UpdateSkillRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -106,11 +111,11 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args = append(args, id, slug)
+	args = append(args, id, workspaceID)
 	query := `UPDATE agent_skills SET ` + strings.Join(setClauses, ", ") +
-		` WHERE id = ? AND workspace_id = (SELECT id FROM workspaces WHERE slug = ?)`
+		` WHERE id = ? AND workspace_id = ?`
 
-	res, err := h.DB.Exec(query, args...)
+	res, err := h.DB.ExecContext(r.Context(), query, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update skill")
 		return
@@ -124,8 +129,9 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch updated
 	var sk protocol.AgentSkill
-	if err := h.DB.QueryRow(
-		`SELECT id, workspace_id, name, description, created_at FROM agent_skills WHERE id = ?`, id,
+	if err := h.DB.QueryRowContext(r.Context(),
+		`SELECT id, workspace_id, name, description, created_at FROM agent_skills WHERE id = ? AND workspace_id = ?`,
+		id, workspaceID,
 	).Scan(&sk.ID, &sk.WorkspaceID, &sk.Name, &sk.Description, &sk.CreatedAt); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to fetch updated skill")
 		return
@@ -136,13 +142,15 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 
 // DELETE /api/workspaces/{slug}/agents/skills/{id}
 func (h *Handler) DeleteSkill(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	res, err := h.DB.Exec(
-		`DELETE FROM agent_skills WHERE id = ? AND workspace_id = (SELECT id FROM workspaces WHERE slug = ?)`,
-		id, slug,
-	)
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+
+	res, err := h.DB.ExecContext(r.Context(), `DELETE FROM agent_skills WHERE id = ? AND workspace_id = ?`, id, workspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete skill")
 		return
@@ -159,8 +167,13 @@ func (h *Handler) DeleteSkill(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/workspaces/{slug}/agents/{id}/skills
 func (h *Handler) AddAgentSkill(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	agentID := idParam(r, "id")
+
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
 
 	var req protocol.AddAgentSkillRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -174,19 +187,18 @@ func (h *Handler) AddAgentSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify agent is in workspace
-	var workspaceID string
-	if err := h.DB.QueryRow(
-		`SELECT a.workspace_id FROM agents a
-		 JOIN workspaces w ON w.id = a.workspace_id
-		 WHERE w.slug = ? AND a.id = ?`, slug, agentID,
-	).Scan(&workspaceID); err != nil {
+	var agentExists bool
+	if err := h.DB.QueryRowContext(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM agents WHERE workspace_id = ? AND id = ?)`,
+		workspaceID, agentID,
+	).Scan(&agentExists); err != nil || !agentExists {
 		writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
 
 	// Verify skill exists in same workspace
 	var skillExists bool
-	if err := h.DB.QueryRow(
+	if err := h.DB.QueryRowContext(r.Context(),
 		`SELECT EXISTS(SELECT 1 FROM agent_skills WHERE id = ? AND workspace_id = ?)`,
 		req.SkillID, workspaceID,
 	).Scan(&skillExists); err != nil || !skillExists {
@@ -194,7 +206,7 @@ func (h *Handler) AddAgentSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.DB.Exec(
+	if _, err := h.DB.ExecContext(r.Context(),
 		`INSERT OR IGNORE INTO agent_skills_agents (agent_id, skill_id) VALUES (?, ?)`,
 		agentID, req.SkillID,
 	); err != nil {
@@ -207,23 +219,31 @@ func (h *Handler) AddAgentSkill(w http.ResponseWriter, r *http.Request) {
 
 // DELETE /api/workspaces/{slug}/agents/{id}/skills/{skillId}
 func (h *Handler) RemoveAgentSkill(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	agentID := idParam(r, "id")
 	skillID := idParam(r, "skillId")
 
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+
 	// Verify agent is in workspace
-	if err := h.DB.QueryRow(
-		`SELECT a.workspace_id FROM agents a
-		 JOIN workspaces w ON w.id = a.workspace_id
-		 WHERE w.slug = ? AND a.id = ?`, slug, agentID,
-	).Scan(new(string)); err != nil {
+	var agentExists bool
+	if err := h.DB.QueryRowContext(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM agents WHERE workspace_id = ? AND id = ?)`,
+		workspaceID, agentID,
+	).Scan(&agentExists); err != nil || !agentExists {
 		writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
 
-	res, err := h.DB.Exec(
-		`DELETE FROM agent_skills_agents WHERE agent_id = ? AND skill_id = ?`,
-		agentID, skillID,
+	res, err := h.DB.ExecContext(
+		r.Context(),
+		`DELETE FROM agent_skills_agents
+		 WHERE agent_id = ? AND skill_id = ?
+		   AND EXISTS (SELECT 1 FROM agent_skills WHERE id = ? AND workspace_id = ?)`,
+		agentID, skillID, skillID, workspaceID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove skill")
@@ -238,5 +258,3 @@ func (h *Handler) RemoveAgentSkill(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusNoContent, nil)
 }
-
-

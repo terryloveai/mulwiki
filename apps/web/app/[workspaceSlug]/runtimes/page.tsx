@@ -71,14 +71,14 @@ export default function RuntimesPage({
 }) {
   const { workspaceSlug } = use(params);
   const { data: runtimes = [], isLoading: runtimesLoading, error: runtimesError } = useRuntimes(workspaceSlug);
-  const { data: daemons = [], isLoading: daemonsLoading } = useDaemons();
+  const { data: daemons = [], isLoading: daemonsLoading } = useDaemons(workspaceSlug);
   const [search, setSearch] = useState("");
   const [expandedDaemons, setExpandedDaemons] = useState<Set<string>>(new Set());
   const [viewingLogs, setViewingLogs] = useState<string | null>(null);
 
-  const stopDaemon = useStopDaemon();
+  const stopDaemon = useStopDaemon(workspaceSlug);
   const startDaemon = useStartDaemon(workspaceSlug);
-  const { data: logsData } = useDaemonLogs(viewingLogs);
+  const { data: logsData } = useDaemonLogs(workspaceSlug, viewingLogs);
 
   const now = Date.now();
 

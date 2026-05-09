@@ -48,6 +48,11 @@ func newTestHandler(t *testing.T) *Handler {
 	); err != nil {
 		t.Fatalf("seed workspace: %v", err)
 	}
+	if _, err := db.Exec(
+		`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws1', 'dev-user', 'owner')`,
+	); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
 
 	return &Handler{DB: db}
 }
@@ -69,8 +74,8 @@ func chiRequest(method, target string, params map[string]string, body io.Reader)
 // findSchemaSQL locates the schema.sql file relative to common working directories.
 func findSchemaSQL() string {
 	candidates := []string{
-		"../../pkg/db/schema.sql",         // from server/internal/handler/
-		"../pkg/db/schema.sql",            // alternative
+		"../../pkg/db/schema.sql", // from server/internal/handler/
+		"../pkg/db/schema.sql",    // alternative
 		filepath.Join("pkg", "db", "schema.sql"),
 	}
 	for _, c := range candidates {

@@ -18,6 +18,21 @@ func newTestJobService(t *testing.T) *JobService {
 
 	if _, err := db.Exec(`
 		CREATE TABLE workspaces (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+		CREATE TABLE agent_runtimes (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE TABLE agents (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			runtime_id TEXT REFERENCES agent_runtimes(id),
+			name TEXT NOT NULL,
+			max_concurrent_tasks INTEGER NOT NULL DEFAULT 6,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
 		CREATE TABLE jobs (
 			id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
 			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -32,7 +47,33 @@ func newTestJobService(t *testing.T) *JobService {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			completed_at TEXT
 		);
+		CREATE TABLE agent_tasks (
+			id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+			job_id TEXT NOT NULL DEFAULT '',
+			agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+			runtime_id TEXT REFERENCES agent_runtimes(id),
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			source_path TEXT NOT NULL DEFAULT '',
+			schema_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			priority INTEGER NOT NULL DEFAULT 0,
+			parent_task_id TEXT,
+			session_id TEXT NOT NULL DEFAULT '',
+			work_dir TEXT NOT NULL DEFAULT '',
+			failure_reason TEXT NOT NULL DEFAULT '',
+			daemon_id TEXT NOT NULL DEFAULT '',
+			dispatched_at TEXT,
+			started_at TEXT,
+			completed_at TEXT,
+			result TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			attempt INTEGER NOT NULL DEFAULT 1,
+			max_attempts INTEGER NOT NULL DEFAULT 3,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
 		INSERT INTO workspaces (id, slug, name) VALUES ('ws1', 'test', 'Test Workspace');
+		INSERT INTO agent_runtimes (id, workspace_id, name) VALUES ('rt1', 'ws1', 'Runtime');
+		INSERT INTO agents (id, workspace_id, runtime_id, name) VALUES ('agent1', 'ws1', 'rt1', 'Agent');
 	`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -43,7 +84,12 @@ func newTestJobService(t *testing.T) *JobService {
 func TestCreateJob(t *testing.T) {
 	s := newTestJobService(t)
 
-	job, err := s.CreateJob("ws1", "src1", "sch1")
+	job, err := s.CreateJob(CreateJobInput{
+		WorkspaceID: "ws1",
+		AgentID:     "agent1",
+		SourcePath:  "src1",
+		SchemaID:    "sch1",
+	})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
@@ -60,14 +106,50 @@ func TestCreateJob(t *testing.T) {
 	if job.SchemaID != "sch1" {
 		t.Errorf("expected schema_id 'sch1', got '%s'", job.SchemaID)
 	}
+	if job.AgentID != "agent1" {
+		t.Errorf("expected agent_id 'agent1', got '%s'", job.AgentID)
+	}
+
+	var taskJobID, taskStatus, taskAgentID, taskRuntimeID string
+	if err := s.DB.QueryRow(
+		`SELECT job_id, status, agent_id, COALESCE(runtime_id, '') FROM agent_tasks WHERE job_id = ?`,
+		job.ID,
+	).Scan(&taskJobID, &taskStatus, &taskAgentID, &taskRuntimeID); err != nil {
+		t.Fatalf("expected agent task for job: %v", err)
+	}
+	if taskJobID != job.ID || taskStatus != "queued" || taskAgentID != "agent1" || taskRuntimeID != "rt1" {
+		t.Fatalf("unexpected task row: job=%q status=%q agent=%q runtime=%q", taskJobID, taskStatus, taskAgentID, taskRuntimeID)
+	}
+}
+
+func TestCreateJobWithSourcePaths(t *testing.T) {
+	s := newTestJobService(t)
+
+	job, err := s.CreateJob(CreateJobInput{
+		WorkspaceID:  "ws1",
+		AgentID:      "agent1",
+		SourcePaths:  []string{"src1", "src2"},
+		SchemaID:     "sch1",
+		InitialClaim: "daemon-seed",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	if len(job.SourcePaths) != 2 {
+		t.Fatalf("expected 2 source paths, got %d", len(job.SourcePaths))
+	}
+	if job.ClaimedBy != "daemon-seed" {
+		t.Errorf("expected claimed_by daemon-seed, got %q", job.ClaimedBy)
+	}
 }
 
 func TestClaimJob(t *testing.T) {
 	s := newTestJobService(t)
 
 	// Create two pending jobs.
-	s.CreateJob("ws1", "src1", "sch1")
-	s.CreateJob("ws1", "src2", "sch2")
+	s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
+	s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src2", SchemaID: "sch2"})
 
 	// Claim first.
 	job1, err := s.ClaimJob("ws1", "daemon-1")
@@ -124,9 +206,9 @@ func TestClaimJobNoPendingJobs(t *testing.T) {
 func TestCompleteJob(t *testing.T) {
 	s := newTestJobService(t)
 
-	job, _ := s.CreateJob("ws1", "src1", "sch1")
+	job, _ := s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
 
-	err := s.CompleteJob(job.ID, 100)
+	err := s.CompleteJob("ws1", job.ID, 100)
 	if err != nil {
 		t.Fatalf("CompleteJob: %v", err)
 	}
@@ -147,9 +229,9 @@ func TestCompleteJob(t *testing.T) {
 func TestFailJob(t *testing.T) {
 	s := newTestJobService(t)
 
-	job, _ := s.CreateJob("ws1", "src1", "sch1")
+	job, _ := s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
 
-	err := s.FailJob(job.ID, "something went wrong")
+	err := s.FailJob("ws1", job.ID, "something went wrong")
 	if err != nil {
 		t.Fatalf("FailJob: %v", err)
 	}
@@ -166,9 +248,9 @@ func TestFailJob(t *testing.T) {
 func TestUpdateJobProgress(t *testing.T) {
 	s := newTestJobService(t)
 
-	job, _ := s.CreateJob("ws1", "src1", "sch1")
+	job, _ := s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
 
-	err := s.UpdateJobProgress(job.ID, 50)
+	err := s.UpdateJobProgress("ws1", job.ID, 50)
 	if err != nil {
 		t.Fatalf("UpdateJobProgress: %v", err)
 	}
@@ -176,5 +258,30 @@ func TestUpdateJobProgress(t *testing.T) {
 	updated, _ := s.GetJob(job.ID)
 	if updated.Progress != 50 {
 		t.Errorf("expected progress 50, got %d", updated.Progress)
+	}
+}
+
+func TestListAndGetJobsAreWorkspaceScoped(t *testing.T) {
+	s := newTestJobService(t)
+	s.DB.Exec(`INSERT INTO workspaces (id, slug, name) VALUES ('ws2', 'other', 'Other')`)
+	s.DB.Exec(`INSERT INTO agent_runtimes (id, workspace_id, name) VALUES ('rt2', 'ws2', 'Runtime 2')`)
+	s.DB.Exec(`INSERT INTO agents (id, workspace_id, runtime_id, name) VALUES ('agent2', 'ws2', 'rt2', 'Agent 2')`)
+	ws1Job, _ := s.CreateJob(CreateJobInput{WorkspaceID: "ws1", AgentID: "agent1", SourcePath: "src1", SchemaID: "sch1"})
+	s.CreateJob(CreateJobInput{WorkspaceID: "ws2", AgentID: "agent2", SourcePath: "src2", SchemaID: "sch1"})
+
+	jobs, err := s.ListJobs("ws1")
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].WorkspaceID != "ws1" {
+		t.Fatalf("expected only ws1 jobs, got %+v", jobs)
+	}
+
+	got, err := s.GetWorkspaceJob("ws1", ws1Job.ID)
+	if err != nil {
+		t.Fatalf("GetWorkspaceJob: %v", err)
+	}
+	if got.ID != ws1Job.ID {
+		t.Errorf("expected %s, got %s", ws1Job.ID, got.ID)
 	}
 }

@@ -9,15 +9,13 @@ import (
 
 // GET /api/workspaces/{slug}/agents/runtimes
 func (h *Handler) ListRuntimes(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
-
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
 
-	rows, err := h.DB.Query(
+	rows, err := h.DB.QueryContext(r.Context(),
 		`SELECT id, workspace_id, name, backend, path, hostname, os, version, status, daemon_id, last_heartbeat, created_at
 		 FROM agent_runtimes WHERE workspace_id = ? ORDER BY created_at DESC`, workspaceID,
 	)
@@ -37,16 +35,18 @@ func (h *Handler) ListRuntimes(w http.ResponseWriter, r *http.Request) {
 		}
 		runtimes = append(runtimes, rt)
 	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to iterate runtimes")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"runtimes": runtimes})
 }
 
 // POST /api/workspaces/{slug}/agents/runtimes
 func (h *Handler) CreateRuntime(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
-
-	var workspaceID string
-	if err := h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, slug).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
@@ -63,7 +63,7 @@ func (h *Handler) CreateRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var rt protocol.AgentRuntime
-	err := h.DB.QueryRow(
+	err = h.DB.QueryRowContext(r.Context(),
 		`INSERT INTO agent_runtimes (workspace_id, name, backend, path, hostname, os, version, status, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, 'offline', ?)
 		 RETURNING id, workspace_id, name, backend, path, hostname, os, version, status, daemon_id, last_heartbeat, created_at`,
@@ -80,16 +80,20 @@ func (h *Handler) CreateRuntime(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/workspaces/{slug}/agents/runtimes/{id}
 func (h *Handler) GetRuntime(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+
 	var rt protocol.AgentRuntime
-	err := h.DB.QueryRow(
-		`SELECT rt.id, rt.workspace_id, rt.name, rt.backend, rt.path, rt.hostname, rt.os, rt.version,
-		        rt.status, rt.daemon_id, rt.last_heartbeat, rt.created_at
-		 FROM agent_runtimes rt
-		 JOIN workspaces w ON w.id = rt.workspace_id
-		 WHERE w.slug = ? AND rt.id = ?`, slug, id,
+	err = h.DB.QueryRowContext(r.Context(),
+		`SELECT id, workspace_id, name, backend, path, hostname, os, version,
+		        status, daemon_id, last_heartbeat, created_at
+		 FROM agent_runtimes
+		 WHERE workspace_id = ? AND id = ?`, workspaceID, id,
 	).Scan(&rt.ID, &rt.WorkspaceID, &rt.Name, &rt.Backend, &rt.Path,
 		&rt.Hostname, &rt.OS, &rt.Version, &rt.Status, &rt.DaemonID, &rt.LastHeartbeat, &rt.CreatedAt)
 	if err != nil {
@@ -102,16 +106,18 @@ func (h *Handler) GetRuntime(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /api/workspaces/{slug}/agents/runtimes/{id}
 func (h *Handler) UpdateRuntime(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	// Verify runtime exists in workspace
-	var workspaceID string
-	if err := h.DB.QueryRow(
-		`SELECT rt.workspace_id FROM agent_runtimes rt
-		 JOIN workspaces w ON w.id = rt.workspace_id
-		 WHERE w.slug = ? AND rt.id = ?`, slug, id,
-	).Scan(&workspaceID); err != nil {
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	var exists bool
+	if err := h.DB.QueryRowContext(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM agent_runtimes WHERE workspace_id = ? AND id = ?)`,
+		workspaceID, id,
+	).Scan(&exists); err != nil || !exists {
 		writeError(w, http.StatusNotFound, "runtime not found")
 		return
 	}
@@ -154,12 +160,12 @@ func (h *Handler) UpdateRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := "UPDATE agent_runtimes SET " + joinClauses(cls, ", ") + " WHERE id = ?" +
+	q := "UPDATE agent_runtimes SET " + joinClauses(cls, ", ") + " WHERE id = ? AND workspace_id = ?" +
 		" RETURNING id, workspace_id, name, backend, path, hostname, os, version, status, daemon_id, last_heartbeat, created_at"
-	args = append(args, id)
+	args = append(args, id, workspaceID)
 
 	var rt protocol.AgentRuntime
-	err := h.DB.QueryRow(q, args...).Scan(
+	err = h.DB.QueryRowContext(r.Context(), q, args...).Scan(
 		&rt.ID, &rt.WorkspaceID, &rt.Name, &rt.Backend, &rt.Path,
 		&rt.Hostname, &rt.OS, &rt.Version, &rt.Status, &rt.DaemonID, &rt.LastHeartbeat, &rt.CreatedAt,
 	)
@@ -173,13 +179,15 @@ func (h *Handler) UpdateRuntime(w http.ResponseWriter, r *http.Request) {
 
 // DELETE /api/workspaces/{slug}/agents/runtimes/{id}
 func (h *Handler) DeleteRuntime(w http.ResponseWriter, r *http.Request) {
-	slug := workspaceSlug(r)
 	id := idParam(r, "id")
 
-	res, err := h.DB.Exec(
-		`DELETE FROM agent_runtimes WHERE id = ? AND workspace_id = (SELECT id FROM workspaces WHERE slug = ?)`,
-		id, slug,
-	)
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+
+	res, err := h.DB.ExecContext(r.Context(), `DELETE FROM agent_runtimes WHERE id = ? AND workspace_id = ?`, id, workspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete runtime")
 		return

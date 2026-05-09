@@ -5,25 +5,29 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/tethy/mulwiki/server/internal/events"
 	"github.com/tethy/mulwiki/server/internal/logbuf"
+	"github.com/tethy/mulwiki/server/internal/middleware"
 	"github.com/tethy/mulwiki/server/internal/realtime"
+	"github.com/tethy/mulwiki/server/internal/store"
 )
 
 // Handler provides HTTP handler methods with shared dependencies.
 // Pattern matches Multica's Handler struct — one Handler for all domains,
 // with method receivers on individual handler files.
 type Handler struct {
-	DB         *sql.DB
-	EventBus   *events.Bus
-	Realtime   *realtime.Hub
+	DB                *sql.DB
+	EventBus          *events.Bus
+	Realtime          *realtime.Hub
 	ReposDir          string // directory for bare git repos (e.g. "./data/repos")
-	BuiltinSchemasDir string // directory for builtin schema .md files to seed (e.g. "./data/builtin-schemas")
-	LogBuf     *logbuf.Store
+	BuiltinSchemasDir string // directory for builtin schema .md files to seed (e.g. "./builtin/schemas")
+	BuiltinSkillsDir  string // directory for builtin skill definitions (e.g. "./builtin/skills")
+	LogBuf            *logbuf.Store
 }
 
 // New creates a new Handler with the given database connection.
@@ -42,6 +46,25 @@ func (h *Handler) reposDir() string {
 		return h.ReposDir
 	}
 	return "./data/repos"
+}
+
+func (h *Handler) builtinSchemasDir() string {
+	if h.BuiltinSchemasDir != "" {
+		return h.BuiltinSchemasDir
+	}
+	return firstExistingDir("./builtin/schemas", "server/builtin/schemas")
+}
+
+func firstExistingDir(candidates ...string) string {
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }
 
 // writeJSON serializes v as JSON and writes it to the response.
@@ -84,7 +107,18 @@ func isUniqueConstraint(err error) bool {
 
 // userID extracts the X-User-ID header set by auth middleware.
 func userID(r *http.Request) string {
+	if id := middleware.GetUserID(r); id != "" {
+		return id
+	}
 	return r.Header.Get("X-User-ID")
+}
+
+func isDaemonRequest(r *http.Request) bool {
+	return middleware.GetDaemonID(r) != ""
+}
+
+func daemonID(r *http.Request) string {
+	return middleware.GetDaemonID(r)
 }
 
 // nullStr returns a pointer to s, or nil if s is empty.
@@ -101,4 +135,12 @@ func strOrEmpty(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func (h *Handler) workspaceIDForRequest(r *http.Request) (string, error) {
+	if id := middleware.GetWorkspaceID(r); id != "" {
+		return id, nil
+	}
+
+	return store.NewWorkspaceStore(h.DB).GetIDBySlug(r.Context(), workspaceSlug(r))
 }

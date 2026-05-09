@@ -2,7 +2,9 @@ package handler
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,12 +14,35 @@ import (
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
+type failingFlushWriter struct {
+	header http.Header
+	code   int
+}
+
+func (w *failingFlushWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingFlushWriter) WriteHeader(code int) {
+	w.code = code
+}
+
+func (w *failingFlushWriter) Write(_ []byte) (int, error) {
+	return 0, errors.New("client disconnected")
+}
+
+func (w *failingFlushWriter) Flush() {}
+
 // ---------------------------------------------------------------------------
 // Job CRUD
 // ---------------------------------------------------------------------------
 
 func TestCreateJob(t *testing.T) {
 	h := newTestHandler(t)
+	seedJobAgent(t, h, "agent1", "rt-job-1")
 
 	body := `{"source_path":"src1","schema_id":"sch1","agent_id":"agent1"}`
 	req := chiRequest(http.MethodPost, "/api/workspaces/test-workspace/jobs", map[string]string{"slug": "test-workspace"}, strings.NewReader(body))
@@ -49,10 +74,19 @@ func TestCreateJob(t *testing.T) {
 	if j.Progress != 0 {
 		t.Errorf("expected progress 0, got %d", j.Progress)
 	}
+
+	var taskJobID, taskStatus, taskAgentID string
+	if err := h.DB.QueryRow(`SELECT job_id, status, agent_id FROM agent_tasks WHERE job_id = ?`, j.ID).Scan(&taskJobID, &taskStatus, &taskAgentID); err != nil {
+		t.Fatalf("expected agent task for job: %v", err)
+	}
+	if taskJobID != j.ID || taskStatus != "queued" || taskAgentID != "agent1" {
+		t.Fatalf("unexpected agent task row: job=%q status=%q agent=%q", taskJobID, taskStatus, taskAgentID)
+	}
 }
 
 func TestCreateJob_WithSourcePaths(t *testing.T) {
 	h := newTestHandler(t)
+	seedJobAgent(t, h, "agent1", "rt-job-1")
 
 	body := `{"source_paths":["src1","src2","src3"],"agent_id":"agent1","schema_id":"sch1"}`
 	req := chiRequest(http.MethodPost, "/api/workspaces/test-workspace/jobs", map[string]string{"slug": "test-workspace"}, strings.NewReader(body))
@@ -84,6 +118,17 @@ func TestCreateJob_MissingAgentID(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}
+
+func seedJobAgent(t *testing.T, h *Handler, agentID, runtimeID string) {
+	t.Helper()
+
+	if _, err := h.DB.Exec(`INSERT INTO agent_runtimes (id, workspace_id, name, backend, path) VALUES (?, 'ws1', 'Runtime', 'codex', '/bin/codex')`, runtimeID); err != nil {
+		t.Fatalf("seed runtime: %v", err)
+	}
+	if _, err := h.DB.Exec(`INSERT INTO agents (id, workspace_id, name, runtime_id, runtime_mode) VALUES (?, 'ws1', 'Agent', ?, 'codex')`, agentID, runtimeID); err != nil {
+		t.Fatalf("seed agent: %v", err)
 	}
 }
 
@@ -403,6 +448,38 @@ func TestStreamJobLogs_StatusTransitions(t *testing.T) {
 	h.DB.QueryRow(`SELECT status FROM jobs WHERE id = 'job1'`).Scan(&status)
 	if status != "completed" {
 		t.Errorf("expected 'completed', got '%s'", status)
+	}
+}
+
+func TestStreamJobLogsStopsOnWriteError(t *testing.T) {
+	h := newTestHandler(t)
+	h.DB.Exec(`INSERT INTO jobs (id, workspace_id, status, progress) VALUES ('job1', 'ws1', 'running', 10)`)
+
+	oldInterval := jobLogStreamInterval
+	jobLogStreamInterval = 5 * time.Millisecond
+	defer func() { jobLogStreamInterval = oldInterval }()
+
+	req := chiRequest(http.MethodGet, "/api/workspaces/test-workspace/jobs/job1/logs", map[string]string{"slug": "test-workspace", "id": "job1"}, nil)
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
+	writer := &failingFlushWriter{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.StreamJobLogs(writer, req)
+	}()
+
+	select {
+	case <-done:
+		if writer.code != http.StatusOK {
+			t.Fatalf("expected stream to start with 200, got %d", writer.code)
+		}
+	case <-time.After(150 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("expected stream to stop after write error")
 	}
 }
 

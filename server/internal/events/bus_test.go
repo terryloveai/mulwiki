@@ -162,8 +162,14 @@ func TestAllEventTypes(t *testing.T) {
 		EventTaskStarted,
 		EventTaskCompleted,
 		EventTaskFailed,
+		EventTaskCancelled,
+		EventTaskMessage,
 		EventDaemonOnline,
 		EventDaemonOffline,
+		EventAgentUpdated,
+		EventSchemaUpdated,
+		EventSourceUpdated,
+		EventWikiUpdated,
 	}
 
 	for _, et := range types {

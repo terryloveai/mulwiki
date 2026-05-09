@@ -18,8 +18,14 @@ const (
 	EventTaskStarted    EventType = "task.started"
 	EventTaskCompleted  EventType = "task.completed"
 	EventTaskFailed     EventType = "task.failed"
+	EventTaskCancelled  EventType = "task.cancelled"
+	EventTaskMessage    EventType = "task.message"
 	EventDaemonOnline   EventType = "daemon.online"
 	EventDaemonOffline  EventType = "daemon.offline"
+	EventAgentUpdated   EventType = "agent.updated"
+	EventSchemaUpdated  EventType = "schema.updated"
+	EventSourceUpdated  EventType = "source.updated"
+	EventWikiUpdated    EventType = "wiki.updated"
 )
 
 // Event is a single event delivered through the bus.

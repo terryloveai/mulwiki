@@ -13,7 +13,8 @@ mulwiki/
 │   └── views/         Page-level components
 ├── server/
 │   ├── cmd/server/    HTTP server (chi router)
-│   ├── cmd/mulwiki/   CLI (daemon subcommand)
+│   ├── cmd/mulwiki/   CLI (login/setup + daemon subcommands)
+│   ├── builtin/       Built-in schemas and skills shipped with the server
 │   ├── internal/
 │   │   ├── handler/   HTTP handlers
 │   │   ├── daemon/    Daemon loop + agent job execution
@@ -24,9 +25,22 @@ mulwiki/
 │   └── pkg/
 │       ├── db/         SQL schema
 │       └── protocol/   Shared types
-├── schemas/           Built-in schema definitions (Markdown)
 └── scripts/           Dev helpers
 ```
+
+## Architecture Guardrails
+
+Mulwiki intentionally follows Multica's boundary shape, not its full stack:
+
+- Keep chi route groups as the backend composition boundary. Public auth and health routes are explicit; workspace routes must run through Auth, Workspace, then Role middleware.
+- Treat `workspace_members` as the tenant boundary. A request is workspace-scoped only after membership has been resolved into context.
+- Keep handlers thin. Handlers decode HTTP, call service/store code, publish events, and serialize responses.
+- Put lifecycle rules in services. Claiming, dispatching, completing, failing, and retrying jobs or agent tasks should not be duplicated in handlers and daemon code.
+- Keep schema Markdown decoupled from agents. Ingest combines Sources + Schema + Agent at job/task creation time.
+- Use `packages/core` for API clients, query keys, query options, hooks, and shared types. Use `packages/views` for page-level React components. `apps/web/app` route files should be thin route adapters.
+- Use React Query as the source of truth for server state. Do not introduce a separate client store for data fetched from the API.
+
+Do not port Multica details that do not fit Mulwiki's current shape: PostgreSQL, Redis queues, desktop window orchestration, GORM, or model selection at runtime level.
 
 ## Core Concepts
 
@@ -44,7 +58,7 @@ A Markdown file defining how knowledge is organized. Five dimensions:
 - **Ingest Pipeline**: Step-by-step document → wiki workflow
 - **Lint Rules**: Quality checks (orphans, contradictions, evidence chains)
 
-6 built-in schemas in `schemas/`. Users can create custom schemas or fork built-in ones. Schema files are pure Markdown — no agent references, no pipeline routing config.
+6 built-in schemas in `server/builtin/schemas/`. Users can create custom schemas or fork built-in ones. Schema files are pure Markdown — no agent references, no pipeline routing config.
 
 ### Agent Runtime
 An execution environment for agents. Represents an installed agent CLI daemon on a physical machine. Each Runtime tracks: backend type (claude-code / codex / kimi / custom), CLI path, hostname, OS, version, daemon_id (which daemon manages it), last_heartbeat (liveness), online/offline status.
@@ -80,6 +94,9 @@ Key fields for reliability:
 
 ### Daemon Registration
 When the daemon starts, it registers itself with the server: daemon ID, hostname, PID, version, which runtimes it manages, and max concurrent task capacity. The server stores this in `daemon_registrations` and links each runtime's `daemon_id` and `last_heartbeat`. Heartbeats every 30s keep the registration alive; stale daemons (no heartbeat for 5min) have their runtimes marked offline.
+
+The local CLI stores its server URL, default workspace slug, and session cookie in `~/.mulwiki/config.json`.
+`mulwiki daemon start` can use that login state to mint and cache a workspace-scoped daemon token automatically, so users do not have to pass `MULWIKI_DAEMON_TOKEN` manually during normal setup.
 
 ### EventBus
 In-process event system (`internal/events/bus.go`). Handlers publish typed events (task.dispatched, task.started, task.completed, task.failed, daemon.online, daemon.offline). The EventBus fans out to all subscribers — primarily the WebSocket Hub for real-time UI updates, but also internal services (analytics, stale detection).

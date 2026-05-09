@@ -1,14 +1,19 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/tethy/mulwiki/server/pkg/agent"
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
@@ -41,10 +46,183 @@ func TestNewDaemon(t *testing.T) {
 	}
 }
 
+func TestLoadOrCreateDaemonIDPersistsStableID(t *testing.T) {
+	idPath := filepath.Join(t.TempDir(), "daemon.id")
+
+	first, err := LoadOrCreateDaemonID(idPath)
+	if err != nil {
+		t.Fatalf("load/create first id: %v", err)
+	}
+	if first == "" {
+		t.Fatal("expected first id")
+	}
+
+	second, err := LoadOrCreateDaemonID(idPath)
+	if err != nil {
+		t.Fatalf("load/create second id: %v", err)
+	}
+	if second != first {
+		t.Fatalf("expected stable daemon id %q, got %q", first, second)
+	}
+}
+
+func TestNewDaemonRequestUsesConfiguredDaemonToken(t *testing.T) {
+	d := New(Config{
+		ServerURL:     "http://localhost:8080",
+		WorkspaceSlug: "test",
+		DaemonID:      "daemon-1",
+		DaemonToken:   "mwd_test-token",
+	})
+
+	req, err := d.newDaemonRequest(http.MethodPost, "http://localhost:8080/api/daemon/register", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	if got := req.Header.Get("Authorization"); got != "Bearer mwd_test-token" {
+		t.Fatalf("expected configured bearer token, got %q", got)
+	}
+	if got := req.Header.Get("X-Daemon-ID"); got != "daemon-1" {
+		t.Fatalf("expected X-Daemon-ID daemon-1, got %q", got)
+	}
+}
+
+func TestRunKeepsDetectedAgentVersions(t *testing.T) {
+	binDir := t.TempDir()
+	fakeCLI := filepath.Join(binDir, "fake-codex")
+	if runtime.GOOS == "windows" {
+		fakeCLI += ".bat"
+		if err := os.WriteFile(fakeCLI, []byte("@echo codex-test 1.0\r\n"), 0o755); err != nil {
+			t.Fatalf("write fake CLI: %v", err)
+		}
+	} else if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\necho codex-test 1.0\n"), 0o755); err != nil {
+		t.Fatalf("write fake CLI: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	originalKnownAgents := knownAgents
+	knownAgents = map[string]struct{ exe, display string }{
+		"codex": {filepath.Base(fakeCLI), "Codex"},
+	}
+	t.Cleanup(func() { knownAgents = originalKnownAgents })
+
+	srv, mux := setupMockServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mux.HandleFunc("/api/daemon/register", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protocol.DaemonRegistration{
+			ID:         "daemon-1",
+			RuntimeIDs: []string{"rt-1"},
+		})
+	})
+	mux.HandleFunc("/api/daemon/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	d := New(Config{
+		ServerURL:     srv.URL,
+		WorkspaceSlug: "test",
+		DaemonID:      "daemon-1",
+		WorkDir:       t.TempDir(),
+	})
+	err := d.RunContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if got := d.agentVersion("codex"); got != "codex-test 1.0" {
+		t.Fatalf("agent version = %q, want detected version", got)
+	}
+}
+
+func TestTaskMessageBatcherFlushesMessagesAndPinsSession(t *testing.T) {
+	srv, mux := setupMockServer(t)
+
+	messageCalls := make(chan []protocol.AgentTaskMessage, 1)
+	sessionCalls := make(chan map[string]string, 1)
+	logCalls := make(chan map[string]string, 2)
+
+	mux.HandleFunc("/api/daemon/tasks/task-1/messages", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST /messages, got %s", r.Method)
+		}
+		var body struct {
+			Messages []protocol.AgentTaskMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode messages: %v", err)
+		}
+		messageCalls <- body.Messages
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/api/daemon/tasks/task-1/session", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode session: %v", err)
+		}
+		sessionCalls <- body
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/job-1/log-line", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode log: %v", err)
+		}
+		logCalls <- body
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	d := New(Config{ServerURL: srv.URL, WorkspaceSlug: "test", DaemonID: "daemon-1"})
+	batcher := newTaskMessageBatcher(d, "job-1", "task-1", "/tmp/work", 10*time.Millisecond)
+	batcher.Add(agent.Message{Type: agent.MessageStatus, Status: "running", SessionID: "sess-1"})
+	batcher.Add(agent.Message{Type: agent.MessageText, Content: "hello"})
+	batcher.Close()
+
+	select {
+	case messages := <-messageCalls:
+		if len(messages) != 2 {
+			t.Fatalf("expected 2 messages, got %d: %#v", len(messages), messages)
+		}
+		if messages[0].Seq != 1 || messages[0].Type != "status" || messages[0].SessionID != "sess-1" {
+			t.Fatalf("unexpected first message: %#v", messages[0])
+		}
+		if messages[1].Seq != 2 || messages[1].Type != "text" || messages[1].Content != "hello" {
+			t.Fatalf("unexpected second message: %#v", messages[1])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for messages call")
+	}
+
+	select {
+	case session := <-sessionCalls:
+		if session["session_id"] != "sess-1" || session["work_dir"] != "/tmp/work" {
+			t.Fatalf("unexpected session body: %#v", session)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for session call")
+	}
+
+	for i := 0; i < 2; i++ {
+		select {
+		case log := <-logCalls:
+			if log["line"] == "" {
+				t.Fatalf("expected log line, got %#v", log)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for log call")
+		}
+	}
+}
+
 func TestClaimNextJob_NoPendingJobs(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
@@ -65,14 +243,14 @@ func TestClaimNextJob_NoPendingJobs(t *testing.T) {
 func TestClaimNextJob_Success(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		job := map[string]interface{}{
 			"id":           "job-1",
 			"workspace_id": "ws1",
 			"status":       "running",
 			"agent_id":     "agent-1",
-			"source_path":    "src-1",
-			"source_paths":   []string{"src-1", "src-2"},
+			"source_path":  "src-1",
+			"source_paths": []string{"src-1", "src-2"},
 			"schema_id":    "sch-1",
 			"progress":     0,
 			"error":        "",
@@ -106,22 +284,22 @@ func TestClaimNextJob_Success(t *testing.T) {
 func TestFetchAgent_Success(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/agents/agent-1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/agents/agent-1", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
 		agent := map[string]interface{}{
-			"id":            "agent-1",
-			"workspace_id":  "ws1",
-			"runtime_id":    "rt-1",
-			"name":          "Test Agent",
-			"description":   "A test agent",
-			"instructions":  "Do the thing",
-			"runtime_mode":  "claude-code",
-			"custom_env":    map[string]string{"ANTHROPIC_API_KEY": "sk-test"},
-			"custom_args":   []string{"--verbose"},
-			"visibility":    "private",
-			"status":        "online",
+			"id":           "agent-1",
+			"workspace_id": "ws1",
+			"runtime_id":   "rt-1",
+			"name":         "Test Agent",
+			"description":  "A test agent",
+			"instructions": "Do the thing",
+			"runtime_mode": "claude-code",
+			"custom_env":   map[string]string{"ANTHROPIC_API_KEY": "sk-test"},
+			"custom_args":  []string{"--verbose"},
+			"visibility":   "private",
+			"status":       "online",
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"agent": agent})
@@ -147,7 +325,7 @@ func TestFetchAgent_Success(t *testing.T) {
 func TestFetchAgent_NotFound(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/agents/missing", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/agents/missing", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
 
@@ -168,12 +346,12 @@ func TestFetchAgent_NotFound(t *testing.T) {
 func TestFetchRuntime_Success(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/agents/runtimes/rt-1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/agents/runtimes/rt-1", func(w http.ResponseWriter, r *http.Request) {
 		rt := map[string]interface{}{
 			"id":           "rt-1",
 			"workspace_id": "ws1",
 			"name":         "Claude Code",
-			"backend":     "claude-code",
+			"backend":      "claude-code",
 			"path":         "/usr/local/bin/claude",
 			"status":       "online",
 		}
@@ -200,11 +378,11 @@ func TestBuildWorkdir(t *testing.T) {
 	// now clones a bare git repo and creates worktrees. Skipped in unit tests;
 	// covered by integration/E2E tests.
 	t.Skip("requires real git bare repo — covered by E2E tests")
-	
+
 	srv, mux := setupMockServer(t)
 
 	// Mock workspace fetch (needed by fetchWorkspace).
-	mux.HandleFunc("/api/workspaces/test", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test", func(w http.ResponseWriter, r *http.Request) {
 		ws := map[string]interface{}{
 			"id":   "ws1",
 			"slug": "test",
@@ -215,11 +393,11 @@ func TestBuildWorkdir(t *testing.T) {
 	})
 
 	// Mock schema fetch.
-	mux.HandleFunc("/api/workspaces/test/schemas/sch-1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/schemas/sch-1", func(w http.ResponseWriter, r *http.Request) {
 		schema := map[string]interface{}{
-			"id":      "sch-1",
-			"name":    "Test Schema",
-			"config":  "# Types\n- Fact\n- Concept",
+			"id":     "sch-1",
+			"name":   "Test Schema",
+			"config": "# Types\n- Fact\n- Concept",
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(schema)
@@ -228,9 +406,9 @@ func TestBuildWorkdir(t *testing.T) {
 	// Mock source fetch.
 	mux.HandleFunc("/api/workspaces/test/sources/src-1", func(w http.ResponseWriter, r *http.Request) {
 		src := map[string]interface{}{
-			"id":       "src-1",
-			"name":     "test-doc.md",
-			"type":     "markdown",
+			"id":        "src-1",
+			"name":      "test-doc.md",
+			"type":      "markdown",
 			"file_path": "",
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -247,8 +425,8 @@ func TestBuildWorkdir(t *testing.T) {
 	d := New(Config{ServerURL: srv.URL, WorkspaceSlug: "test"})
 
 	job := protocol.Job{
-		ID:       "job-test-1",
-		SchemaID: "sch-1",
+		ID:         "job-test-1",
+		SchemaID:   "sch-1",
 		SourcePath: "src-1",
 	}
 	agent := &protocol.Agent{
@@ -354,9 +532,9 @@ func TestMergeEnv(t *testing.T) {
 
 	parent := []string{"PATH=/usr/bin", "HOME=/home/user", "EXISTING=old"}
 	custom := map[string]string{
-		"NEW_VAR":       "new-value",
-		"EXISTING":      "overridden",
-		"API_TOKEN":     "secret-123",
+		"NEW_VAR":   "new-value",
+		"EXISTING":  "overridden",
+		"API_TOKEN": "secret-123",
 	}
 
 	merged := d.mergeEnv(parent, custom)
@@ -456,7 +634,8 @@ func entriesToNames(entries []os.DirEntry) []string {
 // ── Integration: End-to-End Job Pipeline ──
 
 // TestE2EJobPipeline validates the entire job lifecycle:
-//   create job → daemon claims → daemon executes (no-op) → job completed
+//
+//	create job → daemon claims → daemon executes (no-op) → job completed
 //
 // All server endpoints are mocked via httptest. The agent subprocess is
 // skipped (no real CLI) — only the API orchestration is tested.
@@ -468,7 +647,7 @@ func TestE2EJobPipeline(t *testing.T) {
 	taskUpdated := make(chan string, 3) // collects status updates
 
 	// Mock: workspace fetch
-	mux.HandleFunc("/api/workspaces/test", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET /workspaces/test, got %s", r.Method)
 		}
@@ -479,8 +658,8 @@ func TestE2EJobPipeline(t *testing.T) {
 		})
 	})
 
-	// Mock: job claim (POST /api/workspaces/test/jobs/claim)
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	// Mock: job claim (POST /api/daemon/workspaces/test/jobs/claim)
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST /jobs/claim, got %s", r.Method)
 		}
@@ -506,7 +685,7 @@ func TestE2EJobPipeline(t *testing.T) {
 	})
 
 	// Mock: agent fetch
-	mux.HandleFunc("/api/workspaces/test/agents/agent-1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/agents/agent-1", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"agent": protocol.Agent{
 			ID:           "agent-1",
 			WorkspaceID:  "ws1",
@@ -519,7 +698,7 @@ func TestE2EJobPipeline(t *testing.T) {
 	})
 
 	// Mock: runtime fetch
-	mux.HandleFunc("/api/workspaces/test/agents/runtimes/rt-1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/agents/runtimes/rt-1", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"runtime": protocol.AgentRuntime{
 			ID:      "rt-1",
 			Name:    "Echo Runtime",
@@ -530,16 +709,16 @@ func TestE2EJobPipeline(t *testing.T) {
 	})
 
 	// Mock: schema fetch
-	mux.HandleFunc("/api/workspaces/test/schemas/sch-1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/schemas/sch-1", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(protocol.Schema{
-			ID:     "sch-1",
-			Name:   "Test Schema",
+			ID:      "sch-1",
+			Name:    "Test Schema",
 			Content: "# Types\n- Fact",
 		})
 	})
 
-	// Mock: create task (POST /api/workspaces/test/agents/agent-1/tasks)
-	mux.HandleFunc("/api/workspaces/test/agents/agent-1/tasks", func(w http.ResponseWriter, r *http.Request) {
+	// Mock: create task (POST /api/daemon/workspaces/test/agents/agent-1/tasks)
+	mux.HandleFunc("/api/daemon/workspaces/test/agents/agent-1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST /tasks, got %s", r.Method)
 		}
@@ -561,7 +740,7 @@ func TestE2EJobPipeline(t *testing.T) {
 	})
 
 	// Mock: update task (PATCH)
-	mux.HandleFunc("/api/workspaces/test/agents/agent-1/tasks/task-e2e-1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/agents/agent-1/tasks/task-e2e-1", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]interface{}
 		json.NewDecoder(r.Body).Decode(&body)
 		if st, ok := body["status"].(string); ok {
@@ -571,12 +750,12 @@ func TestE2EJobPipeline(t *testing.T) {
 	})
 
 	// Mock: update progress
-	mux.HandleFunc("/api/workspaces/test/jobs/job-e2e-1/progress", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/job-e2e-1/progress", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
 	// Mock: complete job
-	mux.HandleFunc("/api/workspaces/test/jobs/job-e2e-1/complete", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/job-e2e-1/complete", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST /complete, got %s", r.Method)
 		}
@@ -652,10 +831,10 @@ func TestE2EJobPipeline(t *testing.T) {
 	}
 
 	// Test 5: Task status update works (mark started → completed → failed)
-	if err := d.updateTask("agent-1", "task-e2e-1", "started", "", "", 0); err != nil {
+	if err := d.updateTask("agent-1", "task-e2e-1", "running", "", "", 0, "", ""); err != nil {
 		t.Fatalf("updateTask started: %v", err)
 	}
-	if err := d.updateTask("agent-1", "task-e2e-1", "completed", "pages_created=3", "", 0); err != nil {
+	if err := d.updateTask("agent-1", "task-e2e-1", "completed", "pages_created=3", "", 0, "", ""); err != nil {
 		t.Fatalf("updateTask completed: %v", err)
 	}
 
@@ -706,12 +885,12 @@ func TestE2EJobFailure(t *testing.T) {
 	jobFailed := make(chan struct{}, 1)
 
 	// Mock: workspace
-	mux.HandleFunc("/api/workspaces/test", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"id": "ws1", "slug": "test", "name": "Test"})
 	})
 
 	// Mock: job claim returns an agent-bound job that will fail
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(protocol.Job{
 			ID:          "job-fail-1",
 			WorkspaceID: "ws1",
@@ -723,7 +902,7 @@ func TestE2EJobFailure(t *testing.T) {
 	})
 
 	// Mock: agent fetch returns agent with non-existent runtime
-	mux.HandleFunc("/api/workspaces/test/agents/agent-1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/agents/agent-1", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"agent": protocol.Agent{
 			ID:        "agent-1",
 			RuntimeID: "rt-nonexistent",
@@ -732,12 +911,12 @@ func TestE2EJobFailure(t *testing.T) {
 	})
 
 	// Mock: runtime fetch returns 404
-	mux.HandleFunc("/api/workspaces/test/agents/runtimes/rt-nonexistent", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/agents/runtimes/rt-nonexistent", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
 
 	// Mock: fail job
-	mux.HandleFunc("/api/workspaces/test/jobs/job-fail-1/fail", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/job-fail-1/fail", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 		if body["error"] == "" {
@@ -778,7 +957,7 @@ func TestE2EJobFailure(t *testing.T) {
 func TestDaemonJobClaim_NoContent(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -797,7 +976,7 @@ func TestDaemonJobClaim_NoContent(t *testing.T) {
 func TestDaemonJobClaim_Error(t *testing.T) {
 	srv, mux := setupMockServer(t)
 
-	mux.HandleFunc("/api/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/daemon/workspaces/test/jobs/claim", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 

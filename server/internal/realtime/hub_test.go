@@ -27,6 +27,13 @@ func TestNewHub(t *testing.T) {
 	}
 }
 
+func TestWebSocketHandshakeTimeout(t *testing.T) {
+	hub := NewHub(nil)
+	if hub.upgrader.HandshakeTimeout != 10*time.Second {
+		t.Fatalf("expected websocket handshake timeout 10s, got %s", hub.upgrader.HandshakeTimeout)
+	}
+}
+
 func TestNewHub_NilBus(t *testing.T) {
 	hub := NewHub(nil)
 	if hub == nil {
@@ -209,6 +216,28 @@ func TestServeWS_ValidConnection(t *testing.T) {
 	defer conn.Close()
 
 	// Verify client is registered.
+	hub.mu.RLock()
+	clientCount := len(hub.clients)
+	hub.mu.RUnlock()
+	if clientCount != 1 {
+		t.Errorf("expected 1 client, got %d", clientCount)
+	}
+}
+
+func TestServeWS_ValidConnectionWithWorkspaceParam(t *testing.T) {
+	bus := events.NewBus()
+	hub := NewHub(bus)
+
+	srv := httptest.NewServer(http.HandlerFunc(hub.ServeWS))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "?workspace=ws1&agent_id=agent1"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
 	hub.mu.RLock()
 	clientCount := len(hub.clients)
 	hub.mu.RUnlock()

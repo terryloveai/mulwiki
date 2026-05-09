@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,12 @@ import (
 	"github.com/tethy/mulwiki/server/internal/logbuf"
 	"github.com/tethy/mulwiki/server/internal/middleware"
 	"github.com/tethy/mulwiki/server/internal/realtime"
+)
+
+const (
+	serverReadHeaderTimeout = 10 * time.Second
+	serverReadTimeout       = 30 * time.Second
+	serverIdleTimeout       = 60 * time.Second
 )
 
 func main() {
@@ -86,7 +93,8 @@ func main() {
 	// --- Create handler ---
 	h := handler.NewWithDeps(db, bus, hub)
 	h.ReposDir = filepath.Join(dataDir, "repos")
-	h.BuiltinSchemasDir = filepath.Join(dataDir, "builtin-schemas")
+	h.BuiltinSchemasDir = resolveBuiltinDir("BUILTIN_SCHEMAS_DIR", "builtin/schemas", "server/builtin/schemas")
+	h.BuiltinSkillsDir = resolveBuiltinDir("BUILTIN_SKILLS_DIR", "builtin/skills", "server/builtin/skills")
 	h.LogBuf = logStore
 
 	// --- Seed builtin schemas into existing workspaces ---
@@ -104,14 +112,11 @@ func main() {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 
-	// Workspace middleware — resolve workspace from URL slug
-	r.Use(middleware.Workspace(db))
-
 	// CORS
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:5173"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-User-ID"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-User-ID", "X-Daemon-ID"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -120,155 +125,64 @@ func main() {
 	go runStaleAgentDetector(db, 5*time.Minute, 30*time.Second)
 
 	// --- Public routes ---
-	r.Group(func(r chi.Router) {
-		// Git repos — expose for daemon cloning (dumb HTTP protocol).
-		r.Handle("/repos/*", http.StripPrefix("/repos/", http.FileServer(http.Dir(filepath.Join(dataDir, "repos")))))
-		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			if err := db.Ping(); err != nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				w.Write([]byte(`{"status":"degraded","db":"unreachable"}`))
-				return
-			}
-			w.Write([]byte(`{"status":"ok","db":"connected"}`))
-		})
-
-		r.Route("/api/auth", func(r chi.Router) {
-			r.Post("/register", h.Register)
-			r.Post("/login", h.Login)
-			r.Post("/logout", h.Logout)
-			r.Get("/me", h.Me)
-		})
-
-		r.Get("/api/schemas/builtin", h.ListBuiltinSchemas)
-
-		// Workspaces (public for now; auth can be added later)
-		r.Route("/api/workspaces", func(r chi.Router) {
-			r.Get("/", h.ListWorkspaces)
-			r.Post("/", h.CreateWorkspace)
-			r.Route("/{slug}", func(r chi.Router) {
-				r.Get("/", h.GetWorkspace)
-				r.Patch("/", h.UpdateWorkspace)
-				r.Delete("/", h.DeleteWorkspace)
-
-				// Schemas
-				r.Route("/schemas", func(r chi.Router) {
-					r.Get("/", h.ListSchemas)
-					r.Post("/", h.CreateSchema)
-					r.Post("/fork", h.ForkSchema)
-					r.Post("/validate", h.ValidateSchema)
-					r.Get("/{id}", h.GetSchema)
-					r.Put("/{id}", h.UpdateSchema)
-					r.Delete("/{id}", h.DeleteSchema)
-				})
-
-				// Workspace-level actions
-				r.Put("/activate-schema", h.ActivateSchema)
-
-				// Sources (git-backed — wildcard path)
-				r.Route("/sources", func(r chi.Router) {
-					r.Get("/", h.ListSources)
-					r.Post("/", h.CreateSource)
-					r.Get("/*", h.GetSource)
-					r.Delete("/*", h.DeleteSource)
-				})
-
-				// Wikilink resolution & backlinks (explicit paths, avoid /* wildcard)
-				r.Post("/wiki/resolve-links", h.ResolveWikiLinks)
-				r.Get("/wiki/backlinks", h.GetWikiBacklinks) // ?path=...
-
-				// Wiki (git-backed — markdown with frontmatter)
-				r.Route("/wiki", func(r chi.Router) {
-					r.Get("/", h.ListWikiPages)
-					r.Get("/search", h.SearchWikiPages)
-					r.Post("/", h.CreateWikiPage)
-					r.Get("/*", h.GetWikiPage)
-					r.Delete("/*", h.DeleteWikiPage)
-				})
-
-				// Jobs (user-facing)
-				r.Route("/jobs", func(r chi.Router) {
-					r.Get("/", h.ListJobs)
-					r.Post("/", h.CreateJob)
-					r.Get("/{id}", h.GetJob)
-					r.Get("/{id}/logs", h.StreamJobLogs)
-
-					// Daemon-facing job endpoints
-					r.Post("/claim", h.ClaimJob)
-					r.Post("/{id}/log-line", h.AppendJobLog)
-					r.Post("/{id}/progress", h.UpdateJobProgress)
-					r.Post("/{id}/complete", h.CompleteJob)
-					r.Post("/{id}/fail", h.FailJob)
-					r.Post("/{id}/output", h.SubmitJobOutput)
-				})
-
-				// Agents
-				r.Route("/agents", func(r chi.Router) {
-					// Runtimes — must register before /{id} catch-all
-					r.Route("/runtimes", func(r chi.Router) {
-						r.Get("/", h.ListRuntimes)
-						r.Post("/", h.CreateRuntime)
-						r.Get("/{id}", h.GetRuntime)
-						r.Patch("/{id}", h.UpdateRuntime)
-						r.Delete("/{id}", h.DeleteRuntime)
-					})
-
-					// Skills — must register before /{id} catch-all
-					r.Route("/skills", func(r chi.Router) {
-						r.Get("/", h.ListSkills)
-						r.Post("/", h.CreateSkill)
-						r.Patch("/{id}", h.UpdateSkill)
-						r.Delete("/{id}", h.DeleteSkill)
-					})
-
-					// Agent list + create
-					r.Get("/", h.ListAgents)
-					r.Post("/", h.CreateAgent)
-
-					// Agent by ID — must come after /runtimes and /skills
-					r.Route("/{id}", func(r chi.Router) {
-						r.Get("/", h.GetAgent)
-						r.Patch("/", h.UpdateAgent)
-						r.Post("/archive", h.ArchiveAgent)
-						r.Post("/restore", h.RestoreAgent)
-						r.Post("/heartbeat", h.AgentHeartbeat)
-
-						// Agent-skill associations
-						r.Route("/skills", func(r chi.Router) {
-							r.Post("/", h.AddAgentSkill)
-							r.Delete("/{skillId}", h.RemoveAgentSkill)
-						})
-
-						// Agent tasks
-						r.Route("/tasks", func(r chi.Router) {
-							r.Get("/", h.ListAgentTasks)
-							r.Post("/", h.CreateAgentTask)
-							r.Post("/claim", h.ClaimAgentTask)
-							r.Get("/{taskId}", h.GetAgentTask)
-							r.Patch("/{taskId}", h.UpdateAgentTask)
-						})
-					})
-				})
-			})
-		})
+	// Git repos — expose for daemon cloning (dumb HTTP protocol).
+	r.Handle("/repos/*", http.StripPrefix("/repos/", http.FileServer(http.Dir(filepath.Join(dataDir, "repos")))))
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := db.Ping(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"degraded","db":"unreachable"}`))
+			return
+		}
+		w.Write([]byte(`{"status":"ok","db":"connected"}`))
 	})
 
-	// --- Protected routes (with JWT auth) ---
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth)
-		// Protected workspace routes use the same handlers;
-		// the middleware sets X-User-ID header.
+	r.Route("/api/auth", func(r chi.Router) {
+		r.Post("/register", h.Register)
+		r.Post("/login", h.Login)
+		r.Post("/logout", h.Logout)
+		r.Get("/me", h.Me)
+	})
+
+	r.Get("/api/schemas/builtin", h.ListBuiltinSchemas)
+
+	// --- Workspace routes ---
+	mountWorkspaceRoutes(r, db, h)
+
+	r.Route("/api/tasks", func(r chi.Router) {
+		r.Use(middleware.Auth(db))
+		r.Get("/{taskId}/messages", h.ListTaskMessages)
 	})
 
 	// --- Daemon routes ---
 	r.Route("/api/daemon", func(r chi.Router) {
+		r.Use(middleware.DaemonAuth(db))
 		r.Get("/", h.ListDaemons)
 		r.Post("/register", h.DaemonRegister)
 		r.Post("/heartbeat", h.DaemonHeartbeat)
 		r.Get("/stale", h.DaemonStale)
+		r.Post("/tasks/{taskId}/messages", h.AppendTaskMessages)
+		r.Post("/tasks/{taskId}/session", h.PinTaskSession)
 		r.Get("/{id}/logs", h.GetDaemonLogs)
 		r.Post("/{id}/stop", h.StopDaemon)
 		r.Post("/start", h.StartDaemon)
+		r.Route("/workspaces/{slug}", func(r chi.Router) {
+			r.Use(middleware.Workspace(db))
+			r.Get("/", h.GetWorkspace)
+			r.Get("/schemas/{id}", h.GetSchema)
+			r.Get("/agents/runtimes/{id}", h.GetRuntime)
+			r.Get("/agents/{id}", h.GetAgent)
+			r.Post("/jobs/claim", h.ClaimJob)
+			r.Post("/jobs/{id}/log-line", h.AppendJobLog)
+			r.Post("/jobs/{id}/progress", h.UpdateJobProgress)
+			r.Post("/jobs/{id}/complete", h.CompleteJob)
+			r.Post("/jobs/{id}/fail", h.FailJob)
+			r.Post("/jobs/{id}/output", h.SubmitJobOutput)
+			r.Post("/agents/{id}/heartbeat", h.AgentHeartbeat)
+			r.Post("/agents/{id}/tasks/claim", h.ClaimAgentTask)
+			r.Post("/agents/{id}/tasks", h.CreateAgentTask)
+			r.Patch("/agents/{id}/tasks/{taskId}", h.UpdateAgentTask)
+		})
 	})
 
 	// --- WebSocket ---
@@ -277,10 +191,7 @@ func main() {
 	})
 
 	// --- Server ---
-	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: r,
-	}
+	srv := newHTTPServer(port, r)
 
 	// Graceful shutdown
 	go func() {
@@ -306,6 +217,129 @@ func main() {
 	slog.Info("server stopped")
 }
 
+func newHTTPServer(port string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":" + port,
+		Handler:           handler,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		IdleTimeout:       serverIdleTimeout,
+	}
+}
+
+func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
+	r.Route("/api/workspaces", func(r chi.Router) {
+		r.Use(middleware.Auth(db))
+		r.Get("/", h.ListWorkspaces)
+		r.Post("/", h.CreateWorkspace)
+		r.Route("/{slug}", func(r chi.Router) {
+			r.Use(middleware.Workspace(db))
+			r.Use(middleware.RequireWorkspaceMember(db))
+			r.Use(middleware.RequireMember())
+
+			r.Get("/", h.GetWorkspace)
+			r.With(middleware.RequireAdmin()).Patch("/", h.UpdateWorkspace)
+			r.With(middleware.RequireOwner()).Delete("/", h.DeleteWorkspace)
+			r.With(middleware.RequireAdmin()).Post("/daemon-tokens", h.CreateDaemonToken)
+
+			// Daemons (user-facing view scoped by workspace)
+			r.Get("/daemons", h.ListWorkspaceDaemons)
+			r.Get("/daemons/{id}/logs", h.GetDaemonLogs)
+			r.With(middleware.RequireAdmin()).Post("/daemons/{id}/stop", h.StopDaemon)
+			r.With(middleware.RequireAdmin()).Post("/daemons/start", h.StartDaemon)
+
+			// Schemas
+			r.Route("/schemas", func(r chi.Router) {
+				r.Get("/", h.ListSchemas)
+				r.With(middleware.RequireAdmin()).Post("/", h.CreateSchema)
+				r.With(middleware.RequireAdmin()).Post("/fork", h.ForkSchema)
+				r.Post("/validate", h.ValidateSchema)
+				r.Get("/{id}", h.GetSchema)
+				r.With(middleware.RequireAdmin()).Put("/{id}", h.UpdateSchema)
+				r.With(middleware.RequireAdmin()).Delete("/{id}", h.DeleteSchema)
+			})
+
+			// Workspace-level actions
+			r.With(middleware.RequireAdmin()).Put("/activate-schema", h.ActivateSchema)
+
+			// Sources (git-backed — wildcard path)
+			r.Route("/sources", func(r chi.Router) {
+				r.Get("/", h.ListSources)
+				r.Post("/", h.CreateSource)
+				r.Get("/*", h.GetSource)
+				r.Delete("/*", h.DeleteSource)
+			})
+
+			// Wikilink resolution & backlinks (explicit paths, avoid /* wildcard)
+			r.Post("/wiki/resolve-links", h.ResolveWikiLinks)
+			r.Get("/wiki/backlinks", h.GetWikiBacklinks) // ?path=...
+
+			// Wiki (git-backed — markdown with frontmatter)
+			r.Route("/wiki", func(r chi.Router) {
+				r.Get("/", h.ListWikiPages)
+				r.Get("/search", h.SearchWikiPages)
+				r.Post("/", h.CreateWikiPage)
+				r.Get("/*", h.GetWikiPage)
+				r.Delete("/*", h.DeleteWikiPage)
+			})
+
+			// Jobs (user-facing)
+			r.Route("/jobs", func(r chi.Router) {
+				r.Get("/", h.ListJobs)
+				r.Post("/", h.CreateJob)
+				r.Get("/{id}", h.GetJob)
+				r.Get("/{id}/logs", h.StreamJobLogs)
+			})
+
+			// Agents
+			r.Route("/agents", func(r chi.Router) {
+				// Runtimes - must register before /{id} catch-all
+				r.Route("/runtimes", func(r chi.Router) {
+					r.Get("/", h.ListRuntimes)
+					r.Post("/", h.CreateRuntime)
+					r.Get("/{id}", h.GetRuntime)
+					r.Patch("/{id}", h.UpdateRuntime)
+					r.Delete("/{id}", h.DeleteRuntime)
+				})
+
+				// Skills - must register before /{id} catch-all
+				r.Route("/skills", func(r chi.Router) {
+					r.Get("/", h.ListSkills)
+					r.Post("/", h.CreateSkill)
+					r.Patch("/{id}", h.UpdateSkill)
+					r.Delete("/{id}", h.DeleteSkill)
+				})
+
+				// Agent list + create
+				r.Get("/", h.ListAgents)
+				r.Post("/", h.CreateAgent)
+
+				// Agent by ID - must come after /runtimes and /skills
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.GetAgent)
+					r.Patch("/", h.UpdateAgent)
+					r.Post("/archive", h.ArchiveAgent)
+					r.Post("/restore", h.RestoreAgent)
+
+					// Agent-skill associations
+					r.Route("/skills", func(r chi.Router) {
+						r.Post("/", h.AddAgentSkill)
+						r.Delete("/{skillId}", h.RemoveAgentSkill)
+					})
+
+					// Agent tasks
+					r.Route("/tasks", func(r chi.Router) {
+						r.Get("/", h.ListAgentTasks)
+						r.Post("/", h.CreateAgentTask)
+						r.Get("/{taskId}", h.GetAgentTask)
+						r.Patch("/{taskId}", h.UpdateAgentTask)
+					})
+				})
+			})
+		})
+	})
+}
+
 // runMigrations reads the schema SQL and executes it against the database.
 func runMigrations(db *sql.DB) error {
 	schemaPath := "pkg/db/schema.sql"
@@ -321,6 +355,9 @@ func runMigrations(db *sql.DB) error {
 
 	if _, err := db.Exec(string(schemaSQL)); err != nil {
 		return fmt.Errorf("exec schema: %w", err)
+	}
+	if err := backfillWorkspaceMembers(db); err != nil {
+		return err
 	}
 	if err := ensureColumn(db, "schemas", "source_type", "TEXT NOT NULL DEFAULT 'user'"); err != nil {
 		return err
@@ -365,12 +402,68 @@ func runMigrations(db *sql.DB) error {
 	if err := ensureColumn(db, "agent_runtimes", "version", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := ensureColumn(db, "agent_tasks", "job_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_agent_tasks_job ON agent_tasks(job_id)`); err != nil {
+		return fmt.Errorf("create agent_tasks job index: %w", err)
+	}
+	for _, col := range []struct {
+		name       string
+		definition string
+	}{
+		{"seq", "INTEGER NOT NULL DEFAULT 0"},
+		{"type", "TEXT NOT NULL DEFAULT ''"},
+		{"tool", "TEXT NOT NULL DEFAULT ''"},
+		{"call_id", "TEXT NOT NULL DEFAULT ''"},
+		{"input", "TEXT NOT NULL DEFAULT '{}'"},
+		{"output", "TEXT NOT NULL DEFAULT ''"},
+		{"status", "TEXT NOT NULL DEFAULT ''"},
+		{"level", "TEXT NOT NULL DEFAULT ''"},
+		{"session_id", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumn(db, "agent_task_messages", col.name, col.definition); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_messages_task_seq ON agent_task_messages(task_id, seq) WHERE seq > 0`); err != nil {
+		return fmt.Errorf("create agent_task_messages seq index: %w", err)
+	}
 
 	slog.Info("migrations applied successfully")
 
 	// Migration 004: Move schema config from DB to git.
 	if err := migrateSchemasToGit(db); err != nil {
 		slog.Warn("schema-to-git migration skipped (non-fatal)", "error", err)
+	}
+
+	return nil
+}
+
+func backfillWorkspaceMembers(db *sql.DB) error {
+	var membershipCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workspace_members`).Scan(&membershipCount); err != nil {
+		return fmt.Errorf("count workspace members: %w", err)
+	}
+	if membershipCount > 0 {
+		return nil
+	}
+
+	var ownerID string
+	if err := db.QueryRow(`SELECT id FROM users ORDER BY created_at ASC, id ASC LIMIT 1`).Scan(&ownerID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("select oldest user for workspace backfill: %w", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role)
+		SELECT id, ?, 'owner'
+		FROM workspaces
+		WHERE slug <> 'builtin'
+	`, ownerID); err != nil {
+		return fmt.Errorf("backfill workspace members: %w", err)
 	}
 
 	return nil
@@ -498,6 +591,21 @@ func seedBuiltinSchemas(db *sql.DB, handler *handler.Handler) error {
 	}
 
 	return nil
+}
+
+func resolveBuiltinDir(envName string, candidates ...string) string {
+	if configured := os.Getenv(envName); configured != "" {
+		return configured
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }
 
 // runStaleAgentDetector periodically marks agents as offline if they haven't

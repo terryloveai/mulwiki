@@ -28,6 +28,8 @@ const (
 
 	// maxMessageSize is the largest message we're willing to read (64KB).
 	maxMessageSize = 65536
+
+	webSocketHandshakeTimeout = 10 * time.Second
 )
 
 // ScopeType identifies the subscription scope for a connected client.
@@ -40,12 +42,12 @@ const (
 
 // Client represents a single WebSocket connection.
 type Client struct {
-	conn     *websocket.Conn
-	send     chan []byte
-	scopes   map[string]struct{} // "workspace:ws1", "agent:agent1"
-	hub      *Hub
-	done     chan struct{}
-	once     sync.Once
+	conn   *websocket.Conn
+	send   chan []byte
+	scopes map[string]struct{} // "workspace:ws1", "agent:agent1"
+	hub    *Hub
+	done   chan struct{}
+	once   sync.Once
 }
 
 // Hub manages all WebSocket connections and routes broadcast
@@ -66,8 +68,9 @@ func NewHub(bus *events.Bus) *Hub {
 		clients: make(map[*Client]struct{}),
 		bus:     bus,
 		upgrader: websocket.Upgrader{
-			ReadBufferSize:  4096,
-			WriteBufferSize: 4096,
+			ReadBufferSize:   4096,
+			WriteBufferSize:  4096,
+			HandshakeTimeout: webSocketHandshakeTimeout,
 			CheckOrigin: func(r *http.Request) bool {
 				return true // allowed origins are handled by the CORS middleware
 			},
@@ -89,8 +92,14 @@ func (h *Hub) subscribeToBus() {
 		events.EventTaskStarted,
 		events.EventTaskCompleted,
 		events.EventTaskFailed,
+		events.EventTaskCancelled,
+		events.EventTaskMessage,
 		events.EventDaemonOnline,
 		events.EventDaemonOffline,
+		events.EventAgentUpdated,
+		events.EventSchemaUpdated,
+		events.EventSourceUpdated,
+		events.EventWikiUpdated,
 	}
 	for _, t := range allTypes {
 		h.bus.Subscribe(t, func(ev events.Event) {
@@ -111,12 +120,16 @@ func (h *Hub) subscribeToBus() {
 
 // ServeWS upgrades an HTTP request to a WebSocket connection.
 // Query params:
-//   - workspace_id  (required) — subscribe to workspace:{id}
+//   - workspace     (required) — subscribe to workspace:{id}
+//   - workspace_id  (legacy alias)
 //   - agent_id      (optional) — also subscribe to agent:{id}
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
-	workspaceID := r.URL.Query().Get("workspace_id")
+	workspaceID := r.URL.Query().Get("workspace")
 	if workspaceID == "" {
-		http.Error(w, "workspace_id query parameter is required", http.StatusBadRequest)
+		workspaceID = r.URL.Query().Get("workspace_id")
+	}
+	if workspaceID == "" {
+		http.Error(w, "workspace query parameter is required", http.StatusBadRequest)
 		return
 	}
 

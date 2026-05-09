@@ -4,6 +4,7 @@ export interface Workspace {
   name: string;
   description: string;
   active_schema_id?: string;
+  active_schema_path?: string;
   created_at: string;
 }
 
@@ -182,6 +183,31 @@ export interface AgentTask {
   attempt: number;
   max_attempts: number;
   created_at: string;
+  messages?: AgentTaskMessage[];
+}
+
+export interface AgentTaskMessage {
+  id: string;
+  task_id: string;
+  workspace_id: string;
+  agent_id: string;
+  role: string;
+  seq: number;
+  type: string;
+  content: string;
+  tool: string;
+  call_id: string;
+  input: Record<string, unknown>;
+  output: string;
+  status: string;
+  level: string;
+  session_id: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface TaskMessagesResponse {
+  messages: AgentTaskMessage[];
 }
 
 /* ── Request / Response shapes ── */

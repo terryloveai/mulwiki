@@ -6,7 +6,7 @@ import type {
   RuntimesResponse, RuntimeResponse,
   AgentsResponse, AgentResponse,
   SkillsResponse, SkillResponse,
-  TasksResponse, TaskResponse,
+  TasksResponse, TaskResponse, TaskMessagesResponse,
   CreateRuntimeRequest, UpdateRuntimeRequest,
   CreateAgentRequest, UpdateAgentRequest,
   CreateSkillRequest, UpdateSkillRequest,
@@ -50,7 +50,13 @@ export const api = {
   // Workspaces
   listWorkspaces: () => fetchJSON<Workspace[]>("/workspaces"),
   getWorkspace: (slug: string) => fetchJSON<Workspace>(`/workspaces/${slug}`),
-  createWorkspace: (data: { name: string; slug: string; description?: string }) =>
+  createWorkspace: (data: {
+    name: string;
+    slug: string;
+    description?: string;
+    initial_schema_type?: "blank" | "builtin";
+    initial_schema_path?: string;
+  }) =>
     fetchJSON<Workspace>("/workspaces", { method: "POST", body: JSON.stringify(data) }),
   updateWorkspace: (slug: string, data: { name: string; description: string }) =>
     fetchJSON<Workspace>(`/workspaces/${slug}`, { method: "PATCH", body: JSON.stringify(data) }),
@@ -113,14 +119,14 @@ export const api = {
   },
 
   /* ── Daemon ── */
-  listDaemons: () =>
-    fetchJSON<{ daemons: Array<{ id: string; hostname: string; pid: number; version: string; runtime_ids: string; max_concurrent_tasks: number; last_heartbeat: string; registered_at: string }> }>(`/daemon`),
-  getDaemonLogs: (id: string, n?: number) =>
-    fetchJSON<{ daemon_id: string; log_path: string; lines: string[]; total: number }>(`/daemon/${id}/logs${n ? `?n=${n}` : ""}`),
-  stopDaemon: (id: string) =>
-    fetchJSON<{ daemon_id: string; status: string }>(`/daemon/${id}/stop`, { method: "POST" }),
+  listDaemons: (ws: string) =>
+    fetchJSON<{ daemons: Array<{ id: string; hostname: string; pid: number; version: string; runtime_ids: string; max_concurrent_tasks: number; last_heartbeat: string; registered_at: string }> }>(`/workspaces/${ws}/daemons`),
+  getDaemonLogs: (ws: string, id: string, n?: number) =>
+    fetchJSON<{ daemon_id: string; log_path: string; lines: string[]; total: number }>(`/workspaces/${ws}/daemons/${id}/logs${n ? `?n=${n}` : ""}`),
+  stopDaemon: (ws: string, id: string) =>
+    fetchJSON<{ daemon_id: string; status: string }>(`/workspaces/${ws}/daemons/${id}/stop`, { method: "POST" }),
   startDaemon: (workspace: string, serverUrl?: string) =>
-    fetchJSON<{ status: string; pid: number }>(`/daemon/start`, {
+    fetchJSON<{ status: string; pid: number }>(`/workspaces/${workspace}/daemons/start`, {
       method: "POST",
       body: JSON.stringify({ workspace, server_url: serverUrl }),
     }),
@@ -201,4 +207,8 @@ export const api = {
     fetchJSON<TasksResponse>(`/workspaces/${ws}/agents/${agentId}/tasks`),
   getAgentTask: (ws: string, agentId: string, taskId: string) =>
     fetchJSON<TaskResponse>(`/workspaces/${ws}/agents/${agentId}/tasks/${taskId}`),
+  listTaskMessages: (taskId: string, since = 0) =>
+    fetchJSON<TaskMessagesResponse>(`/tasks/${taskId}/messages?since=${since}`),
 };
+
+export type ApiClient = typeof api;

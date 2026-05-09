@@ -113,9 +113,19 @@ export function Sidebar({ workspaceSlug, userEmail }: { workspaceSlug: string; u
         )}
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1">
-            <div className="truncate text-xs text-muted-foreground">
-              {userEmail || "Not signed in"}
-            </div>
+            {userEmail ? (
+              <Link
+                href="/account"
+                title={userEmail}
+                className="block truncate text-xs text-muted-foreground hover:text-sidebar-foreground"
+              >
+                {userEmail}
+              </Link>
+            ) : (
+              <div className="truncate text-xs text-muted-foreground">
+                Not signed in
+              </div>
+            )}
           </div>
           <button
             type="button"

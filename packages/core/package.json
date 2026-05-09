@@ -3,10 +3,23 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "exports": {
     "./types": "./types/index.ts",
     "./api": "./api/index.ts",
-    "./hooks": "./hooks/index.ts"
+    "./queries": "./api/queries.ts",
+    "./auth/queries": "./auth/queries.ts",
+    "./hooks": "./hooks/index.ts",
+    "./query-client": "./query-client.ts",
+    "./realtime/ws-client": "./realtime/ws-client.ts",
+    "./realtime/provider": "./realtime/provider.tsx",
+    "./realtime/use-realtime-sync": "./realtime/use-realtime-sync.ts",
+    "./realtime/*": "./realtime/*",
+    "./workspace/queries": "./workspace/queries.ts",
+    "./agents/queries": "./agents/queries.ts",
+    "./jobs/queries": "./jobs/queries.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.96.0"

@@ -10,6 +10,11 @@
     "skipLibCheck": true,
     "declaration": true,
     "declarationMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@mulwiki/core/*": ["../core/*"],
+      "@mulwiki/ui/*": ["../ui/*"]
+    },
     "outDir": "dist"
   },
   "include": ["**/*.ts", "**/*.tsx"],

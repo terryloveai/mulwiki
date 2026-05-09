@@ -111,6 +111,33 @@ cd server && go run ./cmd/server
 cd apps/web && pnpm dev
 ```
 
+### CLI and Daemon
+
+After creating a user and workspace in the web UI, configure the CLI, authenticate,
+and start the local runtime daemon:
+
+```bash
+cd server
+
+# One-command self-host setup. Prompts for email/password if omitted.
+go run ./cmd/mulwiki setup self-host \
+  --server-url http://localhost:8080 \
+  --workspace demo
+
+# Or run the steps separately.
+go run ./cmd/mulwiki login \
+  --server-url http://localhost:8080 \
+  --workspace demo
+
+go run ./cmd/mulwiki daemon start
+go run ./cmd/mulwiki daemon status
+go run ./cmd/mulwiki runtime list
+```
+
+The CLI stores its session in `~/.mulwiki/config.json`. On daemon startup it uses
+that session to mint and cache a workspace-scoped daemon token, then registers
+detected agent runtimes with the server.
+
 ### Build
 
 ```bash
@@ -135,6 +162,7 @@ mulwiki/
 ├── server/
 │   ├── cmd/server/    HTTP server (chi router)
 │   ├── cmd/mulwiki/   CLI (daemon subcommand)
+│   ├── builtin/       Built-in schemas and skills shipped with the server
 │   ├── internal/
 │   │   ├── handler/   HTTP handlers
 │   │   ├── daemon/    Daemon loop + agent job execution
@@ -145,7 +173,6 @@ mulwiki/
 │   └── pkg/
 │       ├── db/         SQL schema
 │       └── protocol/   Shared types
-├── schemas/           Built-in schema definitions (Markdown)
 ├── scripts/           Dev helpers
 ├── LICENSE            MIT License
 ├── Makefile           Build automation
@@ -216,13 +243,15 @@ NEXT_PUBLIC_API_URL=http://localhost:8080
 
 ### Built-in Schemas
 
-Located in `server/data/builtin-schemas/`:
+Located in `server/builtin/schemas/`:
 - `concept-wiki-schema.md` - Strict 9-type hierarchy
 - `karpathy-llm-wiki-schema.md` - Loose, free-link structure
 - `nashsu-llm-wiki-schema.md` - 7-type knowledge graph
 - `llm-knowledge-base-schema.md` - Minimal 3-type system
 - `paper-spec-wiki-schema.md` - Academic 7-type structure
 - `paper-spec-paper-schema.md` - Paper-level YAML structured profile
+
+Built-in skills live under `server/builtin/skills/`. They are catalog templates and are installed or forked into a workspace only when needed.
 
 ## 📖 API Routes
 
