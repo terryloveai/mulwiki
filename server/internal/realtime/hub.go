@@ -90,8 +90,13 @@ func (h *Hub) subscribeToBus() {
 		events.EventTaskCompleted,
 		events.EventTaskFailed,
 		events.EventTaskCancelled,
+		events.EventTaskMessage,
 		events.EventDaemonOnline,
 		events.EventDaemonOffline,
+		events.EventAgentUpdated,
+		events.EventSchemaUpdated,
+		events.EventSourceUpdated,
+		events.EventWikiUpdated,
 	}
 	for _, t := range allTypes {
 		h.bus.Subscribe(t, func(ev events.Event) {
@@ -112,12 +117,16 @@ func (h *Hub) subscribeToBus() {
 
 // ServeWS upgrades an HTTP request to a WebSocket connection.
 // Query params:
-//   - workspace_id  (required) — subscribe to workspace:{id}
+//   - workspace     (required) — subscribe to workspace:{id}
+//   - workspace_id  (legacy alias)
 //   - agent_id      (optional) — also subscribe to agent:{id}
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
-	workspaceID := r.URL.Query().Get("workspace_id")
+	workspaceID := r.URL.Query().Get("workspace")
 	if workspaceID == "" {
-		http.Error(w, "workspace_id query parameter is required", http.StatusBadRequest)
+		workspaceID = r.URL.Query().Get("workspace_id")
+	}
+	if workspaceID == "" {
+		http.Error(w, "workspace query parameter is required", http.StatusBadRequest)
 		return
 	}
 

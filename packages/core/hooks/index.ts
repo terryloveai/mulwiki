@@ -1,7 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
-import { queryKeys } from "../api/queries";
 import {
   agentDetailOptions,
   agentKeys,
@@ -12,7 +11,8 @@ import {
   runtimeListOptions,
   skillListOptions,
 } from "../agents/queries";
-import { jobKeys } from "../jobs/queries";
+import { useRealtimeSync } from "../realtime/use-realtime-sync";
+import { RealtimeClient } from "../realtime/ws-client";
 import type {
   CreateRuntimeRequest,
   UpdateRuntimeRequest,
@@ -225,36 +225,24 @@ export function useAgentTask(ws: string, agentId: string, taskId: string) {
   return useQuery(agentTaskOptions(ws, agentId, taskId));
 }
 
-type RealtimeEvent = {
-  type?: string;
-  workspace_id?: string;
-  agent_id?: string;
-  task_id?: string;
-};
+export { useRealtimeSync } from "../realtime/use-realtime-sync";
+export { useRealtimeClient } from "../realtime/provider";
 
 export function useWorkspaceRealtime(workspaceId?: string | null, workspaceKey = workspaceId ?? "") {
-  const qc = useQueryClient();
+  const [client, setClient] = useState<RealtimeClient | null>(null);
 
   useEffect(() => {
-    if (!workspaceId || typeof window === "undefined") return;
+    if (!workspaceId) {
+      setClient(null);
+      return;
+    }
 
-    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(
-      `${scheme}://${window.location.host}/ws?workspace_id=${encodeURIComponent(workspaceId)}`,
-    );
-
-    socket.onmessage = (message) => {
-      const event = JSON.parse(message.data) as RealtimeEvent;
-      if (event.type?.startsWith("task.")) {
-        qc.invalidateQueries({ queryKey: jobKeys.all(workspaceKey) });
-        qc.invalidateQueries({ queryKey: agentKeys.all(workspaceKey) });
-      }
-      if (event.type?.startsWith("daemon.")) {
-        qc.invalidateQueries({ queryKey: queryKeys.daemons() });
-        qc.invalidateQueries({ queryKey: agentKeys.all(workspaceKey) });
-      }
+    const nextClient = new RealtimeClient({ workspace: workspaceId });
+    setClient(nextClient);
+    return () => {
+      nextClient.close();
     };
+  }, [workspaceId]);
 
-    return () => socket.close();
-  }, [qc, workspaceId, workspaceKey]);
+  useRealtimeSync(workspaceKey, client);
 }

@@ -217,6 +217,28 @@ func TestServeWS_ValidConnection(t *testing.T) {
 	}
 }
 
+func TestServeWS_ValidConnectionWithWorkspaceParam(t *testing.T) {
+	bus := events.NewBus()
+	hub := NewHub(bus)
+
+	srv := httptest.NewServer(http.HandlerFunc(hub.ServeWS))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "?workspace=ws1&agent_id=agent1"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	hub.mu.RLock()
+	clientCount := len(hub.clients)
+	hub.mu.RUnlock()
+	if clientCount != 1 {
+		t.Errorf("expected 1 client, got %d", clientCount)
+	}
+}
+
 func TestHub_EventBusIntegration(t *testing.T) {
 	bus := events.NewBus()
 	hub := NewHub(bus)

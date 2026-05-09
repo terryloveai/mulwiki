@@ -66,7 +66,6 @@ export function agentTasksOptions(workspace: string, agentId: string) {
     queryFn: () => api.listAgentTasks(workspace, agentId),
     select: (data) => data.tasks,
     enabled: !!workspace && !!agentId,
-    refetchInterval: 10_000,
   });
 }
 

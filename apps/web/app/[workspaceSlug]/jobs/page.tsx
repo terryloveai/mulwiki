@@ -443,10 +443,7 @@ function JobLogStream({ workspaceSlug, jobId }: { workspaceSlug: string; jobId: 
 // ── Agent task timeline ──
 function AgentTaskTimeline({ workspaceSlug, agentId }: { workspaceSlug: string; agentId: string }) {
   const [expandedTask, setExpandedTask] = useState<string | null>(null);
-  const { data: tasks } = useQuery({
-    ...agentTasksOptions(workspaceSlug, agentId),
-    refetchInterval: 3000,
-  });
+  const { data: tasks } = useQuery(agentTasksOptions(workspaceSlug, agentId));
 
   const agentTasks = tasks ?? [];
   if (agentTasks.length === 0) return null;

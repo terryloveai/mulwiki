@@ -6,6 +6,7 @@ export const jobKeys = {
   all: (workspace: string) => [...workspaceKeys.detail(workspace), "jobs"] as const,
   list: (workspace: string) => [...jobKeys.all(workspace), "list"] as const,
   detail: (workspace: string, jobId: string) => [...jobKeys.all(workspace), jobId] as const,
+  logs: (workspace: string, jobId: string) => [...jobKeys.detail(workspace, jobId), "logs"] as const,
   taskMessages: (taskId: string) => ["tasks", taskId, "messages"] as const,
 };
 

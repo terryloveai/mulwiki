@@ -12,6 +12,10 @@
     "./queries": "./api/queries.ts",
     "./hooks": "./hooks/index.ts",
     "./query-client": "./query-client.ts",
+    "./realtime/ws-client": "./realtime/ws-client.ts",
+    "./realtime/provider": "./realtime/provider.tsx",
+    "./realtime/use-realtime-sync": "./realtime/use-realtime-sync.ts",
+    "./realtime/*": "./realtime/*",
     "./workspace/queries": "./workspace/queries.ts",
     "./agents/queries": "./agents/queries.ts",
     "./jobs/queries": "./jobs/queries.ts"

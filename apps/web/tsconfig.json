@@ -41,6 +41,9 @@
       "@mulwiki/core/hooks": [
         "../../packages/core/hooks/index.ts"
       ],
+      "@mulwiki/core/realtime/*": [
+        "../../packages/core/realtime/*"
+      ],
       "@mulwiki/views/*": [
         "../../packages/views/*"
       ],

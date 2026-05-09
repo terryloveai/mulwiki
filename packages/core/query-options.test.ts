@@ -33,6 +33,10 @@ expectType<readonly ["workspaces", string]>(workspaceKeys.detail("demo"));
 expectType<readonly ["workspaces", string, "agents", "list"]>(agentKeys.list("demo"));
 expectType<readonly ["workspaces", string, "agents", string]>(agentKeys.detail("demo", "agent-1"));
 expectType<readonly ["workspaces", string, "jobs", "list"]>(jobKeys.list("demo"));
+expectType<readonly ["workspaces", string, "jobs", string, "logs"]>(jobKeys.logs("demo", "job-1"));
+expectType<readonly ["workspaces", string, "schemas", string]>(workspaceKeys.schemaDetail("demo", "schema-1"));
+expectType<readonly ["workspaces", string, "wiki", "list"]>(workspaceKeys.wikiList("demo"));
+expectType<readonly ["workspaces", string, "wiki", string]>(workspaceKeys.wikiDetail("demo", "pages/page.md"));
 
 const workspaceDetail = workspaceDetailOptions("demo");
 expectType<readonly ["workspaces", string]>(workspaceDetail.queryKey);
