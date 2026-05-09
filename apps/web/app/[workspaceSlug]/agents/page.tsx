@@ -2,19 +2,22 @@
 
 import { use, useState, useCallback, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import {
-  useAgents,
-  useAgent,
-  useRuntimes,
-  useSkills,
   useCreateAgent,
   useUpdateAgent,
   useArchiveAgent,
   useRestoreAgent,
   useAssignSkill,
   useUnassignSkill,
-  useAgentTasks,
 } from "@mulwiki/core/hooks";
+import {
+  agentDetailOptions,
+  agentListOptions,
+  agentTasksOptions,
+  runtimeListOptions,
+  skillListOptions,
+} from "@mulwiki/core/agents/queries";
 import type { Agent, AgentTask } from "@mulwiki/core/types";
 import { Badge } from "@mulwiki/ui/components/Badge";
 import { Button } from "@mulwiki/ui/components/Button";
@@ -96,8 +99,8 @@ export default function AgentsPage({
   const router = useRouter();
   const sp = useSearchParams();
 
-  const { data: agents, isLoading: agLoading, refetch: refetchAgents } = useAgents(workspaceSlug);
-  const { data: runtimes } = useRuntimes(workspaceSlug);
+  const { data: agents, isLoading: agLoading, refetch: refetchAgents } = useQuery(agentListOptions(workspaceSlug));
+  const { data: runtimes } = useQuery(runtimeListOptions(workspaceSlug));
 
   // selection driven by searchParams
   const idFromUrl = sp.get("id") ?? "";
@@ -250,9 +253,9 @@ function AgentDetailPanel({
   runtimes: import("@mulwiki/core/types").AgentRuntime[];
   onArchive: () => void;
 }) {
-  const { data: agent, isLoading } = useAgent(workspaceSlug, agentId);
-  const { data: skills } = useSkills(workspaceSlug);
-  const { data: tasks } = useAgentTasks(workspaceSlug, agentId);
+  const { data: agent, isLoading } = useQuery(agentDetailOptions(workspaceSlug, agentId));
+  const { data: skills } = useQuery(skillListOptions(workspaceSlug));
+  const { data: tasks } = useQuery(agentTasksOptions(workspaceSlug, agentId));
   const updateAgent = useUpdateAgent(workspaceSlug);
   const archiveAgent = useArchiveAgent(workspaceSlug);
   const restoreAgent = useRestoreAgent(workspaceSlug);

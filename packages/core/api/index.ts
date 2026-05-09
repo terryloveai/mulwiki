@@ -204,3 +204,5 @@ export const api = {
   listTaskMessages: (taskId: string, since = 0) =>
     fetchJSON<TaskMessagesResponse>(`/tasks/${taskId}/messages?since=${since}`),
 };
+
+export type ApiClient = typeof api;

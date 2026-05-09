@@ -3,6 +3,13 @@
 import { use, useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@mulwiki/core/api";
+import { agentListOptions, agentTasksOptions } from "@mulwiki/core/agents/queries";
+import { jobKeys, jobListOptions, taskMessagesOptions } from "@mulwiki/core/jobs/queries";
+import {
+  schemaListOptions,
+  sourceListOptions,
+  workspaceDetailOptions,
+} from "@mulwiki/core/workspace/queries";
 import { Button } from "@mulwiki/ui/components/Button";
 import { Badge } from "@mulwiki/ui/components/Badge";
 import { Spinner } from "@mulwiki/ui/components/Spinner";
@@ -64,41 +71,16 @@ export default function JobsPage({
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
 
   // Queries
-  const { data: sources } = useQuery({
-    queryKey: ["sources", workspaceSlug],
-    queryFn: () => api.listSources(workspaceSlug),
-  });
+  const { data: sources } = useQuery(sourceListOptions(workspaceSlug));
+  const { data: schemas } = useQuery(schemaListOptions(workspaceSlug));
+  const { data: workspace } = useQuery(workspaceDetailOptions(workspaceSlug));
+  const { data: agents } = useQuery(agentListOptions(workspaceSlug));
 
-  const { data: schemas } = useQuery({
-    queryKey: ["schemas", workspaceSlug],
-    queryFn: () => api.listSchemas(workspaceSlug),
-  });
-
-  const { data: workspace } = useQuery({
-    queryKey: ["workspace", workspaceSlug],
-    queryFn: () => api.getWorkspace(workspaceSlug),
-  });
-
-  const { data: agentsResp } = useQuery({
-    queryKey: ["agents", workspaceSlug],
-    queryFn: () => api.listAgents(workspaceSlug),
-  });
-
-  const agents = agentsResp?.agents ?? [];
+  const availableAgents = agents ?? [];
   const activeSchema = schemas?.find((s) => s.id === workspace?.active_schema_id) ?? schemas?.[0];
-  const agent = agents[0];
+  const agent = availableAgents[0];
 
-  const { data: jobs, isLoading } = useQuery({
-    queryKey: ["jobs", workspaceSlug],
-    queryFn: () => api.listJobs(workspaceSlug),
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      if (!data) return false;
-      return data.some((j) => j.status === "running" || j.status === "pending")
-        ? 2000
-        : false;
-    },
-  });
+  const { data: jobs, isLoading } = useQuery(jobListOptions(workspaceSlug));
 
   // Create mutation — one button, no selectors
   const createMutation = useMutation({
@@ -113,7 +95,7 @@ export default function JobsPage({
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["jobs", workspaceSlug] });
+      queryClient.invalidateQueries({ queryKey: jobKeys.list(workspaceSlug) });
     },
   });
 
@@ -461,25 +443,24 @@ function JobLogStream({ workspaceSlug, jobId }: { workspaceSlug: string; jobId: 
 // ── Agent task timeline ──
 function AgentTaskTimeline({ workspaceSlug, agentId }: { workspaceSlug: string; agentId: string }) {
   const [expandedTask, setExpandedTask] = useState<string | null>(null);
-  const { data: tasksResp } = useQuery({
-    queryKey: ["agents", workspaceSlug, agentId, "tasks"],
-    queryFn: () => api.listAgentTasks(workspaceSlug, agentId),
+  const { data: tasks } = useQuery({
+    ...agentTasksOptions(workspaceSlug, agentId),
     refetchInterval: 3000,
   });
 
-  const tasks = tasksResp?.tasks ?? [];
-  if (tasks.length === 0) return null;
+  const agentTasks = tasks ?? [];
+  if (agentTasks.length === 0) return null;
 
   return (
     <div>
       <div className="flex items-center gap-2 mb-1.5">
         <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
         <span className="text-xs font-medium text-muted-foreground">
-          Agent Tasks ({tasks.length})
+          Agent Tasks ({agentTasks.length})
         </span>
       </div>
       <div className="max-h-40 overflow-y-auto space-y-1">
-        {tasks.map((t) => {
+        {agentTasks.map((t) => {
           const cfg = taskStatusConfig[t.status] ?? { variant: "outline" as const, label: t.status };
           const isExpanded = expandedTask === t.id;
           return (
@@ -531,11 +512,7 @@ function AgentTaskTimeline({ workspaceSlug, agentId }: { workspaceSlug: string; 
 }
 
 function TaskMessagePreview({ taskId, live }: { taskId: string; live: boolean }) {
-  const { data, isLoading } = useQuery({
-    queryKey: ["tasks", taskId, "messages"],
-    queryFn: () => api.listTaskMessages(taskId, 0),
-    refetchInterval: live ? 1500 : false,
-  });
+  const { data: messages, isLoading } = useQuery(taskMessagesOptions(taskId, 0, live ? 1500 : false));
 
   if (isLoading) {
     return (
@@ -546,14 +523,14 @@ function TaskMessagePreview({ taskId, live }: { taskId: string; live: boolean })
     );
   }
 
-  const messages = data?.messages ?? [];
-  if (messages.length === 0) {
+  const taskMessages = messages ?? [];
+  if (taskMessages.length === 0) {
     return <div className="text-muted-foreground">No messages</div>;
   }
 
   return (
     <div className="max-h-48 overflow-y-auto rounded bg-background/60 p-2 font-mono text-[11px]">
-      {messages.slice(-30).map((msg) => {
+      {taskMessages.slice(-30).map((msg) => {
         const label = msg.type || msg.role || "message";
         const text = msg.content || msg.output || msg.status || msg.tool || "";
         return (

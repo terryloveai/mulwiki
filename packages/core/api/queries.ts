@@ -1,31 +1,29 @@
 import { queryOptions } from "@tanstack/react-query";
+import { schemaListOptions, workspaceDetailOptions, workspaceKeys, workspaceListOptions } from "../workspace/queries";
+import { agentKeys } from "../agents/queries";
+import { jobKeys } from "../jobs/queries";
 import { api } from "./index";
 
+export * from "../workspace/queries";
+export * from "../agents/queries";
+export * from "../jobs/queries";
+
 export const queryKeys = {
-  workspaces: () => ["workspaces"] as const,
-  workspace: (slug: string) => ["workspaces", slug] as const,
+  workspaces: workspaceKeys.all,
+  workspace: workspaceKeys.detail,
   builtinSchemas: () => ["schemas", "builtin"] as const,
-  schemas: (workspace: string) => ["schemas", workspace] as const,
-  sources: (workspace: string) => ["sources", workspace] as const,
+  schemas: workspaceKeys.schemaList,
+  sources: workspaceKeys.sourceList,
   wikiPages: (workspace: string) => ["wiki", workspace, "pages"] as const,
-  jobs: (workspace: string) => ["jobs", workspace] as const,
-  agents: (workspace: string) => ["agents", workspace] as const,
-  runtimes: (workspace: string) => ["agents", workspace, "runtimes"] as const,
+  jobs: jobKeys.list,
+  agents: agentKeys.list,
+  runtimes: agentKeys.runtimes,
   daemons: () => ["daemons"] as const,
 };
 
 export const workspaceQueries = {
-  list: () =>
-    queryOptions({
-      queryKey: queryKeys.workspaces(),
-      queryFn: () => api.listWorkspaces(),
-    }),
-  detail: (slug: string) =>
-    queryOptions({
-      queryKey: queryKeys.workspace(slug),
-      queryFn: () => api.getWorkspace(slug),
-      enabled: !!slug,
-    }),
+  list: workspaceListOptions,
+  detail: workspaceDetailOptions,
 };
 
 export const schemaQueries = {
@@ -34,10 +32,5 @@ export const schemaQueries = {
       queryKey: queryKeys.builtinSchemas(),
       queryFn: () => api.listBuiltinSchemas(),
     }),
-  list: (workspace: string) =>
-    queryOptions({
-      queryKey: queryKeys.schemas(workspace),
-      queryFn: () => api.listSchemas(workspace),
-      enabled: !!workspace,
-    }),
+  list: schemaListOptions,
 };

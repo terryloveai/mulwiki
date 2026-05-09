@@ -3,17 +3,20 @@
 import { use, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import {
-  useAgent,
-  useRuntimes,
-  useSkills,
   useUpdateAgent,
   useArchiveAgent,
   useRestoreAgent,
   useAssignSkill,
   useUnassignSkill,
-  useAgentTasks,
 } from "@mulwiki/core/hooks";
+import {
+  agentDetailOptions,
+  agentTasksOptions,
+  runtimeListOptions,
+  skillListOptions,
+} from "@mulwiki/core/agents/queries";
 import { Badge } from "@mulwiki/ui/components/Badge";
 import { Button } from "@mulwiki/ui/components/Button";
 import { Input } from "@mulwiki/ui/components/Input";
@@ -102,9 +105,9 @@ export default function AgentDetailPage({
   const [activeSection, setActiveSection] = useState<Section>("runtime");
   const [editing, setEditing] = useState(false);
 
-  const { data: agent, isLoading: agLoading } = useAgent(workspaceSlug, id);
-  const { data: runtimes } = useRuntimes(workspaceSlug);
-  const { data: skills } = useSkills(workspaceSlug);
+  const { data: agent, isLoading: agLoading } = useQuery(agentDetailOptions(workspaceSlug, id));
+  const { data: runtimes } = useQuery(runtimeListOptions(workspaceSlug));
+  const { data: skills } = useQuery(skillListOptions(workspaceSlug));
   const updateAgent = useUpdateAgent(workspaceSlug);
   const archiveAgent = useArchiveAgent(workspaceSlug);
   const restoreAgent = useRestoreAgent(workspaceSlug);
@@ -794,7 +797,7 @@ function TasksSection({
   workspaceSlug: string;
   agentId: string;
 }) {
-  const { data: tasks, isLoading } = useAgentTasks(workspaceSlug, agentId);
+  const { data: tasks, isLoading } = useQuery(agentTasksOptions(workspaceSlug, agentId));
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
   const perPage = 20;

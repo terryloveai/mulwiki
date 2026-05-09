@@ -2,7 +2,7 @@
 
 import { use } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { workspaceQueries } from "@mulwiki/core/queries";
+import { workspaceDetailOptions } from "@mulwiki/core/workspace/queries";
 import { useWorkspaceRealtime } from "@mulwiki/core/hooks";
 import { Sidebar } from "@mulwiki/ui/components/Sidebar";
 
@@ -14,8 +14,8 @@ export default function WorkspaceLayout({
   params: Promise<{ workspaceSlug: string }>;
 }) {
   const { workspaceSlug } = use(params);
-  const { data: workspace } = useQuery(workspaceQueries.detail(workspaceSlug));
-  useWorkspaceRealtime(workspace?.id);
+  const { data: workspace } = useQuery(workspaceDetailOptions(workspaceSlug));
+  useWorkspaceRealtime(workspace?.id, workspaceSlug);
 
   return (
     <div className="flex h-svh">

@@ -2,6 +2,17 @@ import { useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "../api/queries";
+import {
+  agentDetailOptions,
+  agentKeys,
+  agentListOptions,
+  agentTaskOptions,
+  agentTasksOptions,
+  runtimeDetailOptions,
+  runtimeListOptions,
+  skillListOptions,
+} from "../agents/queries";
+import { jobKeys } from "../jobs/queries";
 import type {
   CreateRuntimeRequest,
   UpdateRuntimeRequest,
@@ -10,26 +21,6 @@ import type {
   CreateSkillRequest,
   UpdateSkillRequest,
 } from "../types";
-
-function agentsKey(ws: string) {
-  return ["agents", ws] as const;
-}
-
-function runtimesKey(ws: string) {
-  return ["agents", ws, "runtimes"] as const;
-}
-
-function agentKey(ws: string, id: string) {
-  return ["agents", ws, id] as const;
-}
-
-function skillsKey(ws: string) {
-  return ["agents", ws, "skills"] as const;
-}
-
-function tasksKey(ws: string, agentId: string) {
-  return ["agents", ws, agentId, "tasks"] as const;
-}
 
 /* ── Daemon ── */
 
@@ -58,7 +49,7 @@ export function useStartDaemon(ws: string) {
     mutationFn: (opts?: { serverUrl?: string }) => api.startDaemon(ws, opts?.serverUrl),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["daemons"] });
-      qc.invalidateQueries({ queryKey: ["agents", ws, "runtimes"] });
+      qc.invalidateQueries({ queryKey: agentKeys.runtimes(ws) });
     },
   });
 }
@@ -75,20 +66,11 @@ export function useDaemonLogs(id: string | null) {
 /* ── Runtimes ── */
 
 export function useRuntimes(ws: string) {
-  return useQuery({
-    queryKey: runtimesKey(ws),
-    queryFn: () => api.listRuntimes(ws),
-    select: (data) => data.runtimes,
-    refetchInterval: 15_000,
-  });
+  return useQuery(runtimeListOptions(ws));
 }
 
 export function useRuntime(ws: string, runtimeId: string) {
-  return useQuery({
-    queryKey: [...runtimesKey(ws), runtimeId],
-    queryFn: () => api.getRuntime(ws, runtimeId),
-    select: (data) => data.runtime,
-  });
+  return useQuery(runtimeDetailOptions(ws, runtimeId));
 }
 
 export function useCreateRuntime(ws: string) {
@@ -96,7 +78,7 @@ export function useCreateRuntime(ws: string) {
   return useMutation({
     mutationFn: (data: CreateRuntimeRequest) => api.createRuntime(ws, data),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: runtimesKey(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.runtimes(ws) });
     },
   });
 }
@@ -107,7 +89,7 @@ export function useUpdateRuntime(ws: string) {
     mutationFn: ({ id, ...data }: UpdateRuntimeRequest & { id: string }) =>
       api.updateRuntime(ws, id, data),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: runtimesKey(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.runtimes(ws) });
     },
   });
 }
@@ -117,7 +99,7 @@ export function useDeleteRuntime(ws: string) {
   return useMutation({
     mutationFn: (runtimeId: string) => api.deleteRuntime(ws, runtimeId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: runtimesKey(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.runtimes(ws) });
     },
   });
 }
@@ -125,21 +107,11 @@ export function useDeleteRuntime(ws: string) {
 /* ── Agents ── */
 
 export function useAgents(ws: string) {
-  return useQuery({
-    queryKey: agentsKey(ws),
-    queryFn: () => api.listAgents(ws),
-    select: (data) => data.agents,
-    refetchInterval: 10_000,
-  });
+  return useQuery(agentListOptions(ws));
 }
 
 export function useAgent(ws: string, id: string) {
-  return useQuery({
-    queryKey: agentKey(ws, id),
-    queryFn: () => api.getAgent(ws, id),
-    select: (data) => data.agent,
-    enabled: !!id,
-  });
+  return useQuery(agentDetailOptions(ws, id));
 }
 
 export function useCreateAgent(ws: string) {
@@ -147,7 +119,7 @@ export function useCreateAgent(ws: string) {
   return useMutation({
     mutationFn: (data: CreateAgentRequest) => api.createAgent(ws, data),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentsKey(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.list(ws) });
     },
   });
 }
@@ -158,8 +130,8 @@ export function useUpdateAgent(ws: string) {
     mutationFn: ({ id, ...data }: UpdateAgentRequest & { id: string }) =>
       api.updateAgent(ws, id, data),
     onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: agentsKey(ws) });
-      qc.invalidateQueries({ queryKey: agentKey(ws, vars.id) });
+      qc.invalidateQueries({ queryKey: agentKeys.list(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(ws, vars.id) });
     },
   });
 }
@@ -169,7 +141,7 @@ export function useArchiveAgent(ws: string) {
   return useMutation({
     mutationFn: (agentId: string) => api.archiveAgent(ws, agentId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentsKey(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.list(ws) });
     },
   });
 }
@@ -179,7 +151,7 @@ export function useRestoreAgent(ws: string) {
   return useMutation({
     mutationFn: (agentId: string) => api.restoreAgent(ws, agentId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentsKey(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.list(ws) });
     },
   });
 }
@@ -187,11 +159,7 @@ export function useRestoreAgent(ws: string) {
 /* ── Skills ── */
 
 export function useSkills(ws: string) {
-  return useQuery({
-    queryKey: skillsKey(ws),
-    queryFn: () => api.listSkills(ws),
-    select: (data) => data.skills,
-  });
+  return useQuery(skillListOptions(ws));
 }
 
 export function useCreateSkill(ws: string) {
@@ -199,7 +167,7 @@ export function useCreateSkill(ws: string) {
   return useMutation({
     mutationFn: (data: CreateSkillRequest) => api.createSkill(ws, data),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: skillsKey(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.skills(ws) });
     },
   });
 }
@@ -210,7 +178,7 @@ export function useUpdateSkill(ws: string) {
     mutationFn: ({ id, ...data }: UpdateSkillRequest & { id: string }) =>
       api.updateSkill(ws, id, data),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: skillsKey(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.skills(ws) });
     },
   });
 }
@@ -220,7 +188,7 @@ export function useDeleteSkill(ws: string) {
   return useMutation({
     mutationFn: (skillId: string) => api.deleteSkill(ws, skillId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: skillsKey(ws) });
+      qc.invalidateQueries({ queryKey: agentKeys.skills(ws) });
     },
   });
 }
@@ -231,7 +199,7 @@ export function useAssignSkill(ws: string) {
     mutationFn: ({ agentId, skillId }: { agentId: string; skillId: string }) =>
       api.assignSkill(ws, agentId, skillId),
     onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: agentKey(ws, vars.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(ws, vars.agentId) });
     },
   });
 }
@@ -242,7 +210,7 @@ export function useUnassignSkill(ws: string) {
     mutationFn: ({ agentId, skillId }: { agentId: string; skillId: string }) =>
       api.unassignSkill(ws, agentId, skillId),
     onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: agentKey(ws, vars.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(ws, vars.agentId) });
     },
   });
 }
@@ -250,22 +218,11 @@ export function useUnassignSkill(ws: string) {
 /* ── Tasks ── */
 
 export function useAgentTasks(ws: string, agentId: string) {
-  return useQuery({
-    queryKey: tasksKey(ws, agentId),
-    queryFn: () => api.listAgentTasks(ws, agentId),
-    select: (data) => data.tasks,
-    refetchInterval: 10_000,
-    enabled: !!agentId,
-  });
+  return useQuery(agentTasksOptions(ws, agentId));
 }
 
 export function useAgentTask(ws: string, agentId: string, taskId: string) {
-  return useQuery({
-    queryKey: [...tasksKey(ws, agentId), taskId],
-    queryFn: () => api.getAgentTask(ws, agentId, taskId),
-    select: (data) => data.task,
-    enabled: !!agentId && !!taskId,
-  });
+  return useQuery(agentTaskOptions(ws, agentId, taskId));
 }
 
 type RealtimeEvent = {
@@ -275,7 +232,7 @@ type RealtimeEvent = {
   task_id?: string;
 };
 
-export function useWorkspaceRealtime(workspaceId?: string | null) {
+export function useWorkspaceRealtime(workspaceId?: string | null, workspaceKey = workspaceId ?? "") {
   const qc = useQueryClient();
 
   useEffect(() => {
@@ -289,15 +246,15 @@ export function useWorkspaceRealtime(workspaceId?: string | null) {
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as RealtimeEvent;
       if (event.type?.startsWith("task.")) {
-        qc.invalidateQueries({ queryKey: ["jobs"] });
-        qc.invalidateQueries({ queryKey: ["agents"] });
+        qc.invalidateQueries({ queryKey: jobKeys.all(workspaceKey) });
+        qc.invalidateQueries({ queryKey: agentKeys.all(workspaceKey) });
       }
       if (event.type?.startsWith("daemon.")) {
         qc.invalidateQueries({ queryKey: queryKeys.daemons() });
-        qc.invalidateQueries({ queryKey: ["agents"] });
+        qc.invalidateQueries({ queryKey: agentKeys.all(workspaceKey) });
       }
     };
 
     return () => socket.close();
-  }, [qc, workspaceId]);
+  }, [qc, workspaceId, workspaceKey]);
 }
