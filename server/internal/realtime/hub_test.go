@@ -27,6 +27,13 @@ func TestNewHub(t *testing.T) {
 	}
 }
 
+func TestWebSocketHandshakeTimeout(t *testing.T) {
+	hub := NewHub(nil)
+	if hub.upgrader.HandshakeTimeout != 10*time.Second {
+		t.Fatalf("expected websocket handshake timeout 10s, got %s", hub.upgrader.HandshakeTimeout)
+	}
+}
+
 func TestNewHub_NilBus(t *testing.T) {
 	hub := NewHub(nil)
 	if hub == nil {

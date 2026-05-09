@@ -2,7 +2,9 @@ package main
 
 import (
 	"database/sql"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	_ "github.com/mattn/go-sqlite3"
@@ -181,4 +183,24 @@ func TestMountWorkspaceRoutesDoesNotDuplicateSlugRoute(t *testing.T) {
 	}()
 
 	mountWorkspaceRoutes(r, db, h)
+}
+
+func TestTimeoutHTTPServerConfiguresRuntimeTimeouts(t *testing.T) {
+	srv := newHTTPServer("9090", http.NewServeMux())
+
+	if srv.Addr != ":9090" {
+		t.Fatalf("expected addr :9090, got %q", srv.Addr)
+	}
+	if srv.ReadHeaderTimeout != 10*time.Second {
+		t.Fatalf("expected ReadHeaderTimeout 10s, got %s", srv.ReadHeaderTimeout)
+	}
+	if srv.ReadTimeout != 30*time.Second {
+		t.Fatalf("expected ReadTimeout 30s, got %s", srv.ReadTimeout)
+	}
+	if srv.IdleTimeout != 60*time.Second {
+		t.Fatalf("expected IdleTimeout 60s, got %s", srv.IdleTimeout)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("expected no global WriteTimeout for SSE/WebSocket, got %s", srv.WriteTimeout)
+	}
 }

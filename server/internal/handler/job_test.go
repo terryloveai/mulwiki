@@ -2,7 +2,9 @@ package handler
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,28 @@ import (
 
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
+
+type failingFlushWriter struct {
+	header http.Header
+	code   int
+}
+
+func (w *failingFlushWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingFlushWriter) WriteHeader(code int) {
+	w.code = code
+}
+
+func (w *failingFlushWriter) Write(_ []byte) (int, error) {
+	return 0, errors.New("client disconnected")
+}
+
+func (w *failingFlushWriter) Flush() {}
 
 // ---------------------------------------------------------------------------
 // Job CRUD
@@ -424,6 +448,38 @@ func TestStreamJobLogs_StatusTransitions(t *testing.T) {
 	h.DB.QueryRow(`SELECT status FROM jobs WHERE id = 'job1'`).Scan(&status)
 	if status != "completed" {
 		t.Errorf("expected 'completed', got '%s'", status)
+	}
+}
+
+func TestStreamJobLogsStopsOnWriteError(t *testing.T) {
+	h := newTestHandler(t)
+	h.DB.Exec(`INSERT INTO jobs (id, workspace_id, status, progress) VALUES ('job1', 'ws1', 'running', 10)`)
+
+	oldInterval := jobLogStreamInterval
+	jobLogStreamInterval = 5 * time.Millisecond
+	defer func() { jobLogStreamInterval = oldInterval }()
+
+	req := chiRequest(http.MethodGet, "/api/workspaces/test-workspace/jobs/job1/logs", map[string]string{"slug": "test-workspace", "id": "job1"}, nil)
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
+	writer := &failingFlushWriter{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.StreamJobLogs(writer, req)
+	}()
+
+	select {
+	case <-done:
+		if writer.code != http.StatusOK {
+			t.Fatalf("expected stream to start with 200, got %d", writer.code)
+		}
+	case <-time.After(150 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("expected stream to stop after write error")
 	}
 }
 

@@ -28,6 +28,8 @@ const (
 
 	// maxMessageSize is the largest message we're willing to read (64KB).
 	maxMessageSize = 65536
+
+	webSocketHandshakeTimeout = 10 * time.Second
 )
 
 // ScopeType identifies the subscription scope for a connected client.
@@ -66,8 +68,9 @@ func NewHub(bus *events.Bus) *Hub {
 		clients: make(map[*Client]struct{}),
 		bus:     bus,
 		upgrader: websocket.Upgrader{
-			ReadBufferSize:  4096,
-			WriteBufferSize: 4096,
+			ReadBufferSize:   4096,
+			WriteBufferSize:  4096,
+			HandshakeTimeout: webSocketHandshakeTimeout,
 			CheckOrigin: func(r *http.Request) bool {
 				return true // allowed origins are handled by the CORS middleware
 			},

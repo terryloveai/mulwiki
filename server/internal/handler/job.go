@@ -14,6 +14,8 @@ import (
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
+var jobLogStreamInterval = time.Second
+
 // DaemonClaimRequest is the request body for claiming a job.
 type DaemonClaimRequest struct {
 	DaemonID string `json:"daemon_id"`
@@ -282,8 +284,8 @@ func (h *Handler) StreamJobLogs(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	// Poll the job status every second, streaming status + log updates until terminal.
-	ticker := time.NewTicker(1 * time.Second)
+	// Poll the job status, streaming status + log updates until terminal.
+	ticker := time.NewTicker(jobLogStreamInterval)
 	defer ticker.Stop()
 
 	ctx := r.Context()
@@ -305,15 +307,15 @@ func (h *Handler) StreamJobLogs(w http.ResponseWriter, r *http.Request) {
 				id, workspaceID,
 			).Scan(&currentStatus, &progress, &jobError, &completedAt)
 			if err != nil {
-				fmt.Fprintf(w, "event: error\ndata: {\"error\":\"%s\"}\n\n", err.Error())
-				flusher.Flush()
+				writeSSE(w, flusher, "event: error\ndata: {\"error\":\"%s\"}\n\n", err.Error())
 				return
 			}
 
 			if currentStatus != lastStatus {
-				fmt.Fprintf(w, "event: status\ndata: {\"status\":\"%s\",\"progress\":%d,\"error\":\"%s\"}\n\n",
-					currentStatus, progress, jobError)
-				flusher.Flush()
+				if !writeSSE(w, flusher, "event: status\ndata: {\"status\":\"%s\",\"progress\":%d,\"error\":\"%s\"}\n\n",
+					currentStatus, progress, jobError) {
+					return
+				}
 				lastStatus = currentStatus
 			}
 
@@ -322,12 +324,11 @@ func (h *Handler) StreamJobLogs(w http.ResponseWriter, r *http.Request) {
 				entries, nextCursor := h.LogBuf.Since(id, logCursor)
 				for _, entry := range entries {
 					data, _ := json.Marshal(entry)
-					fmt.Fprintf(w, "event: log\ndata: %s\n\n", string(data))
+					if !writeSSE(w, flusher, "event: log\ndata: %s\n\n", string(data)) {
+						return
+					}
 				}
 				logCursor = nextCursor
-				if len(entries) > 0 {
-					flusher.Flush()
-				}
 			}
 
 			if currentStatus == "completed" || currentStatus == "failed" {
@@ -335,18 +336,24 @@ func (h *Handler) StreamJobLogs(w http.ResponseWriter, r *http.Request) {
 					entries, _ := h.LogBuf.Since(id, logCursor)
 					for _, entry := range entries {
 						data, _ := json.Marshal(entry)
-						fmt.Fprintf(w, "event: log\ndata: %s\n\n", string(data))
-					}
-					if len(entries) > 0 {
-						flusher.Flush()
+						if !writeSSE(w, flusher, "event: log\ndata: %s\n\n", string(data)) {
+							return
+						}
 					}
 				}
-				fmt.Fprintf(w, "event: done\ndata: {\"status\":\"%s\"}\n\n", currentStatus)
-				flusher.Flush()
+				writeSSE(w, flusher, "event: done\ndata: {\"status\":\"%s\"}\n\n", currentStatus)
 				return
 			}
 		}
 	}
+}
+
+func writeSSE(w http.ResponseWriter, flusher http.Flusher, format string, args ...any) bool {
+	if _, err := fmt.Fprintf(w, format, args...); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
 }
 
 type pageOutput struct {

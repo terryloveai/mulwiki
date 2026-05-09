@@ -27,6 +27,12 @@ import (
 	"github.com/tethy/mulwiki/server/internal/realtime"
 )
 
+const (
+	serverReadHeaderTimeout = 10 * time.Second
+	serverReadTimeout       = 30 * time.Second
+	serverIdleTimeout       = 60 * time.Second
+)
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
@@ -184,10 +190,7 @@ func main() {
 	})
 
 	// --- Server ---
-	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: r,
-	}
+	srv := newHTTPServer(port, r)
 
 	// Graceful shutdown
 	go func() {
@@ -211,6 +214,16 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("server stopped")
+}
+
+func newHTTPServer(port string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":" + port,
+		Handler:           handler,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		IdleTimeout:       serverIdleTimeout,
+	}
 }
 
 func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
