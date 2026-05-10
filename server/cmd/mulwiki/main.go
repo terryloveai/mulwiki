@@ -41,7 +41,11 @@ func resolveProfile(cmd *cobra.Command) string {
 			return normalizeProfile(v)
 		}
 	}
-	return normalizeProfile(profileFlag)
+	if profile := normalizeProfile(profileFlag); profile != "" {
+		return profile
+	}
+	profile, _ := loadActiveProfile()
+	return profile
 }
 
 func main() {

@@ -389,17 +389,17 @@ func (h *Handler) listDaemons(w http.ResponseWriter, _ *http.Request, workspaceI
 		writeError(w, http.StatusInternalServerError, "failed to list daemons")
 		return
 	}
-	defer rows.Close()
 
 	type daemonItem struct {
-		ID                 string `json:"id"`
-		Hostname           string `json:"hostname"`
-		PID                int    `json:"pid"`
-		Version            string `json:"version"`
-		RuntimeIDs         string `json:"runtime_ids"`
-		MaxConcurrentTasks int    `json:"max_concurrent_tasks"`
-		LastHeartbeat      string `json:"last_heartbeat"`
-		RegisteredAt       string `json:"registered_at"`
+		ID                 string   `json:"id"`
+		Hostname           string   `json:"hostname"`
+		PID                int      `json:"pid"`
+		Version            string   `json:"version"`
+		RuntimeIDs         string   `json:"runtime_ids"`
+		WorkspaceSlugs     []string `json:"workspace_slugs"`
+		MaxConcurrentTasks int      `json:"max_concurrent_tasks"`
+		LastHeartbeat      string   `json:"last_heartbeat"`
+		RegisteredAt       string   `json:"registered_at"`
 	}
 
 	daemons := make([]daemonItem, 0)
@@ -411,8 +411,35 @@ func (h *Handler) listDaemons(w http.ResponseWriter, _ *http.Request, workspaceI
 		}
 		daemons = append(daemons, d)
 	}
+	rows.Close()
+	for i := range daemons {
+		daemons[i].WorkspaceSlugs = h.daemonWorkspaceSlugs(daemons[i].ID)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"daemons": daemons})
+}
+
+func (h *Handler) daemonWorkspaceSlugs(daemonID string) []string {
+	rows, err := h.DB.Query(
+		`SELECT DISTINCT w.slug
+		 FROM workspaces w
+		 JOIN agent_runtimes ar ON ar.workspace_id = w.id
+		 WHERE ar.daemon_id = ?
+		 ORDER BY w.slug ASC`,
+		daemonID,
+	)
+	if err != nil {
+		return []string{}
+	}
+	defer rows.Close()
+	slugs := []string{}
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err == nil && slug != "" {
+			slugs = append(slugs, slug)
+		}
+	}
+	return slugs
 }
 
 func (h *Handler) daemonBelongsToWorkspace(daemonID, workspaceID string) bool {

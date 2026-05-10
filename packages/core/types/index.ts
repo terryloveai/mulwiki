@@ -129,6 +129,18 @@ export interface AgentRuntime {
   created_at: string;
 }
 
+export interface DaemonRegistration {
+  id: string;
+  hostname: string;
+  pid: number;
+  version: string;
+  runtime_ids: string;
+  workspace_slugs?: string[];
+  max_concurrent_tasks: number;
+  last_heartbeat: string;
+  registered_at: string;
+}
+
 /* ── Agent Skill ── */
 export interface AgentSkill {
   id: string;

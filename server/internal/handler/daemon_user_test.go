@@ -23,6 +23,7 @@ func TestListWorkspaceDaemonsFiltersByWorkspaceRuntime(t *testing.T) {
 			('daemon-ws2', 'host-b', 222, '0.1.0', '[]', 3, '2026-05-09T14:00:00Z', '2026-05-09T14:00:00Z');
 		INSERT INTO agent_runtimes (id, workspace_id, name, backend, daemon_id, status, last_heartbeat) VALUES
 			('rt-ws1', 'ws1', 'Codex', 'codex', 'daemon-ws1', 'online', '2026-05-09T14:00:00Z'),
+			('rt-ws1-other', 'ws2', 'Codex', 'codex', 'daemon-ws1', 'online', '2026-05-09T14:00:00Z'),
 			('rt-ws2', 'ws2', 'Codex', 'codex', 'daemon-ws2', 'online', '2026-05-09T14:00:00Z');
 	`); err != nil {
 		t.Fatalf("seed daemons: %v", err)
@@ -38,7 +39,8 @@ func TestListWorkspaceDaemonsFiltersByWorkspaceRuntime(t *testing.T) {
 	}
 	var resp struct {
 		Daemons []struct {
-			ID string `json:"id"`
+			ID             string   `json:"id"`
+			WorkspaceSlugs []string `json:"workspace_slugs"`
 		} `json:"daemons"`
 	}
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
@@ -49,6 +51,9 @@ func TestListWorkspaceDaemonsFiltersByWorkspaceRuntime(t *testing.T) {
 	}
 	if resp.Daemons[0].ID != "daemon-ws1" {
 		t.Fatalf("expected daemon-ws1, got %q", resp.Daemons[0].ID)
+	}
+	if got := strings.Join(resp.Daemons[0].WorkspaceSlugs, ","); got != "other-workspace,test-workspace" {
+		t.Fatalf("workspace_slugs = %q", got)
 	}
 }
 

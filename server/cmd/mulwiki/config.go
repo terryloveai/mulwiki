@@ -40,6 +40,51 @@ func mulwikiBaseDir() (string, error) {
 	return filepath.Join(home, ".mulwiki"), nil
 }
 
+func activeProfilePath() (string, error) {
+	base, err := mulwikiBaseDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "profile"), nil
+}
+
+func loadActiveProfile() (string, error) {
+	path, err := activeProfilePath()
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read active profile: %w", err)
+	}
+	profile := normalizeProfile(string(data))
+	if profile == "default" {
+		return "", nil
+	}
+	return profile, nil
+}
+
+func saveActiveProfile(profile string) error {
+	profile = normalizeProfile(profile)
+	path, err := activeProfilePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create profile directory: %w", err)
+	}
+	if profile == "" || profile == "default" {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("clear active profile: %w", err)
+		}
+		return nil
+	}
+	return os.WriteFile(path, []byte(profile+"\n"), 0o600)
+}
+
 func mulwikiProfileDir(profile string) (string, error) {
 	base, err := mulwikiBaseDir()
 	if err != nil {

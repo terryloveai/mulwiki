@@ -3,6 +3,7 @@ import type {
   ResolveWikiLinksRequest, ResolveWikiLinksResponse,
   Job, Agent, User,
   AgentRuntime, AgentSkill, AgentTask,
+  DaemonRegistration,
   RuntimesResponse, RuntimeResponse,
   AgentsResponse, AgentResponse,
   SkillsResponse, SkillResponse,
@@ -120,7 +121,7 @@ export const api = {
 
   /* ── Daemon ── */
   listDaemons: (ws: string) =>
-    fetchJSON<{ daemons: Array<{ id: string; hostname: string; pid: number; version: string; runtime_ids: string; max_concurrent_tasks: number; last_heartbeat: string; registered_at: string }> }>(`/workspaces/${ws}/daemons`),
+    fetchJSON<{ daemons: DaemonRegistration[] }>(`/workspaces/${ws}/daemons`),
   getDaemonLogs: (ws: string, id: string, n?: number) =>
     fetchJSON<{ daemon_id: string; log_path: string; lines: string[]; total: number }>(`/workspaces/${ws}/daemons/${id}/logs${n ? `?n=${n}` : ""}`),
   stopDaemon: (ws: string, id: string) =>

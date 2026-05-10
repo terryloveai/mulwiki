@@ -2,20 +2,16 @@
 
 import { use, useState, useMemo, useCallback } from "react";
 import { useRuntimes, useDaemons, useStopDaemon, useStartDaemon, useDaemonLogs } from "@mulwiki/core/hooks";
-import type { AgentRuntime } from "@mulwiki/core/types";
+import type { AgentRuntime, DaemonRegistration } from "@mulwiki/core/types";
 import { Spinner } from "@mulwiki/ui/components/Spinner";
 import { Badge } from "@mulwiki/ui/components/Badge";
 import { Button } from "@mulwiki/ui/components/Button";
-import { Input } from "@mulwiki/ui/components/Input";
 import {
   Cpu,
   Monitor,
-  Clock,
   Wifi,
   WifiOff,
-  Search,
   Server,
-  Activity,
   Play,
   Square,
   ScrollText,
@@ -53,13 +49,19 @@ function runtimeHealth(rt: AgentRuntime, now: number): "online" | "offline" {
   return "online";
 }
 
-function parseRuntimeIds(raw: string): number {
-  try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr.length : 0;
-  } catch {
-    return 0;
-  }
+function daemonWorkspaceSummary(daemon: DaemonRegistration | undefined, currentWorkspace: string): string {
+  const slugs = daemon?.workspace_slugs ?? [];
+  if (slugs.length === 0) return `workspace ${currentWorkspace}`;
+  if (slugs.length === 1) return `workspace ${slugs[0]}`;
+  return `${slugs.length} workspaces: ${slugs.join(", ")}`;
+}
+
+function daemonStartCommand(workspaceSlug: string): string {
+  return `mulwiki --profile dev daemon start --workspace ${workspaceSlug}`;
+}
+
+function multiWorkspaceDaemonCommand(): string {
+  return "mulwiki --profile dev daemon start";
 }
 
 /* ── page ── */
@@ -72,7 +74,6 @@ export default function RuntimesPage({
   const { workspaceSlug } = use(params);
   const { data: runtimes = [], isLoading: runtimesLoading, error: runtimesError } = useRuntimes(workspaceSlug);
   const { data: daemons = [], isLoading: daemonsLoading } = useDaemons(workspaceSlug);
-  const [search, setSearch] = useState("");
   const [expandedDaemons, setExpandedDaemons] = useState<Set<string>>(new Set());
   const [viewingLogs, setViewingLogs] = useState<string | null>(null);
 
@@ -177,8 +178,8 @@ export default function RuntimesPage({
             <div className="flex h-64 flex-col items-center justify-center gap-3 text-muted-foreground">
               <Cpu className="h-12 w-12 opacity-30" />
               <p className="text-lg font-medium">No runtimes registered</p>
-              <p className="text-sm">
-                Run <code className="rounded bg-muted px-1 py-0.5 text-xs">mulwiki daemon start --workspace {workspaceSlug}</code> to auto-register.
+              <p className="max-w-xl text-center text-sm">
+                Run <code className="rounded bg-muted px-1 py-0.5 text-xs">{daemonStartCommand(workspaceSlug)}</code> for this workspace, or <code className="rounded bg-muted px-1 py-0.5 text-xs">{multiWorkspaceDaemonCommand()}</code> to let a profile daemon discover all of your workspaces.
               </p>
             </div>
           );
@@ -189,9 +190,13 @@ export default function RuntimesPage({
             <div className="mb-4 flex flex-col items-center gap-3 rounded-lg border bg-card p-8 text-muted-foreground">
               <Server className="h-8 w-8 opacity-30" />
               <p className="text-sm font-medium">No daemon running</p>
-              <p className="text-xs">
-                Start a daemon to auto-detect and register runtimes.
+              <p className="max-w-xl text-center text-xs">
+                Start a CLI daemon for this workspace, or run a profile daemon without <code className="rounded bg-muted px-1 py-0.5 text-[11px]">--workspace</code> to auto-discover every workspace your user can access.
               </p>
+              <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
+                <code className="rounded bg-muted px-2 py-1">{daemonStartCommand(workspaceSlug)}</code>
+                <code className="rounded bg-muted px-2 py-1">{multiWorkspaceDaemonCommand()}</code>
+              </div>
               <Button
                 size="sm"
                 onClick={() => startDaemon.mutate({})}
@@ -266,7 +271,7 @@ export default function RuntimesPage({
                       <div className="mt-0.5 text-xs text-muted-foreground">
                         {isOrphan
                           ? `${rts.length} runtime${rts.length !== 1 ? "s" : ""}, no daemon`
-                          : `${rts.length} runtime${rts.length !== 1 ? "s" : ""} · ${online} online`
+                          : `${rts.length} runtime${rts.length !== 1 ? "s" : ""} · ${online} online · ${daemonWorkspaceSummary(daemon, workspaceSlug)}`
                         }
                         {daemon?.last_heartbeat && isAlive && (
                           <span className="ml-2">· up {uptimeSince(daemon.last_heartbeat)}</span>
@@ -400,6 +405,9 @@ export default function RuntimesPage({
                   <div className="border-t px-4 py-1.5">
                     <span className="text-xs text-muted-foreground">
                       {rts.map((r) => r.name).join(", ")}
+                      {daemon?.workspace_slugs && daemon.workspace_slugs.length > 1 && (
+                        <span className="ml-2">· shared across {daemon.workspace_slugs.length} workspaces</span>
+                      )}
                     </span>
                   </div>
                 )}
