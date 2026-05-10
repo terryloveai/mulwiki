@@ -61,7 +61,7 @@ func (d *Daemon) collectOutput(workdir string, job protocol.Job, _ *protocol.Age
 	}{job.ID, pages}
 
 	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/output", d.ServerURL, d.WorkspaceSlug, job.ID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/output", d.ServerURL, d.workspaceSlugForJob(job), job.ID)
 	resp, err := d.postJSON(url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("deliver output: %w", err)
@@ -128,8 +128,8 @@ func (d *Daemon) streamLogs(reader io.Reader, jobID, stream string) {
 	}
 }
 
-func (d *Daemon) postLogLine(jobID, stream, line string) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/log-line", d.ServerURL, d.WorkspaceSlug, jobID)
+func (d *Daemon) postLogLine(jobID, stream, line string, workspaceSlug ...string) {
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/log-line", d.ServerURL, d.workspaceSlugForCall(workspaceSlug...), jobID)
 	body := map[string]string{
 		"stream": stream,
 		"line":   line,
@@ -143,8 +143,9 @@ func (d *Daemon) postLogLine(jobID, stream, line string) {
 	resp.Body.Close()
 }
 
-func (d *Daemon) updateProgress(jobID string, progress int) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/progress", d.ServerURL, d.WorkspaceSlug, jobID)
+func (d *Daemon) updateProgress(jobOrID any, progress int) {
+	jobID, workspaceSlug := d.jobIDAndWorkspace(jobOrID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/progress", d.ServerURL, workspaceSlug, jobID)
 	body := map[string]int{"progress": progress}
 	jsonBody, _ := json.Marshal(body)
 	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
@@ -155,8 +156,9 @@ func (d *Daemon) updateProgress(jobID string, progress int) {
 	resp.Body.Close()
 }
 
-func (d *Daemon) completeJob(jobID string) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/complete", d.ServerURL, d.WorkspaceSlug, jobID)
+func (d *Daemon) completeJob(jobOrID any) {
+	jobID, workspaceSlug := d.jobIDAndWorkspace(jobOrID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/complete", d.ServerURL, workspaceSlug, jobID)
 	resp, err := d.postJSON(url, nil)
 	if err != nil {
 		slog.Error("complete job failed", "job_id", jobID, "error", err)
@@ -166,8 +168,9 @@ func (d *Daemon) completeJob(jobID string) {
 	slog.Info("job completed", "job_id", jobID)
 }
 
-func (d *Daemon) failJob(jobID, errMsg string) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/fail", d.ServerURL, d.WorkspaceSlug, jobID)
+func (d *Daemon) failJob(jobOrID any, errMsg string) {
+	jobID, workspaceSlug := d.jobIDAndWorkspace(jobOrID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/fail", d.ServerURL, workspaceSlug, jobID)
 	body := map[string]string{"error": errMsg}
 	jsonBody, _ := json.Marshal(body)
 	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
@@ -177,6 +180,25 @@ func (d *Daemon) failJob(jobID, errMsg string) {
 	}
 	resp.Body.Close()
 	slog.Error("job failed", "job_id", jobID, "error", errMsg)
+}
+
+func (d *Daemon) jobIDAndWorkspace(jobOrID any) (string, string) {
+	switch v := jobOrID.(type) {
+	case protocol.Job:
+		return v.ID, d.workspaceSlugForJob(v)
+	case *protocol.Job:
+		if v != nil {
+			return v.ID, d.workspaceSlugForJob(*v)
+		}
+	}
+	return fmt.Sprint(jobOrID), d.workspaceSlugForCall()
+}
+
+func (d *Daemon) workspaceSlugForJob(job protocol.Job) string {
+	if strings.TrimSpace(job.WorkspaceSlug) != "" {
+		return strings.TrimSpace(job.WorkspaceSlug)
+	}
+	return d.workspaceSlugForCall()
 }
 
 func copyFile(src, dst string) error {

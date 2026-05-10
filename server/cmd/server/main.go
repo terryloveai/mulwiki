@@ -158,6 +158,7 @@ func main() {
 	r.Route("/api/daemon", func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(db))
 		r.Get("/", h.ListDaemons)
+		r.Get("/workspaces", h.ListDaemonWorkspaces)
 		r.Post("/register", h.DaemonRegister)
 		r.Post("/heartbeat", h.DaemonHeartbeat)
 		r.Get("/stale", h.DaemonStale)
@@ -168,6 +169,7 @@ func main() {
 		r.Post("/start", h.StartDaemon)
 		r.Route("/workspaces/{slug}", func(r chi.Router) {
 			r.Use(middleware.Workspace(db))
+			r.Use(middleware.RequireDaemonWorkspaceAccess(db))
 			r.Get("/", h.GetWorkspace)
 			r.Get("/schemas/{id}", h.GetSchema)
 			r.Get("/agents/runtimes/{id}", h.GetRuntime)
@@ -248,6 +250,7 @@ func allowedOrigins(value string) []string {
 }
 
 func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
+	r.With(middleware.Auth(db)).Post("/api/daemon-tokens", h.CreateUserDaemonToken)
 	r.Route("/api/workspaces", func(r chi.Router) {
 		r.Use(middleware.Auth(db))
 		r.Get("/", h.ListWorkspaces)
@@ -448,6 +451,12 @@ func runMigrations(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_messages_task_seq ON agent_task_messages(task_id, seq) WHERE seq > 0`); err != nil {
 		return fmt.Errorf("create agent_task_messages seq index: %w", err)
+	}
+	if err := ensureColumn(db, "daemon_tokens", "user_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "daemon_tokens", "scope", "TEXT NOT NULL DEFAULT 'workspace'"); err != nil {
+		return err
 	}
 
 	slog.Info("migrations applied successfully")

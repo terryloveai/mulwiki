@@ -14,6 +14,12 @@ type Workspace struct {
 	CreatedAt        string  `json:"created_at"`
 }
 
+type DaemonWorkspace struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
 type CreateWorkspaceRequest struct {
 	Name              string `json:"name"`
 	Slug              string `json:"slug"`
@@ -134,18 +140,19 @@ type WikiBacklink struct {
 // Job models.
 
 type Job struct {
-	ID          string   `json:"id"`
-	WorkspaceID string   `json:"workspace_id"`
-	Status      string   `json:"status"`
-	AgentID     string   `json:"agent_id"`
-	SourcePath  string   `json:"source_path"`
-	SourcePaths []string `json:"source_paths"`
-	SchemaID    string   `json:"schema_id"`
-	Progress    int      `json:"progress"`
-	Error       string   `json:"error"`
-	ClaimedBy   string   `json:"claimed_by"`
-	CreatedAt   string   `json:"created_at"`
-	CompletedAt *string  `json:"completed_at,omitempty"`
+	ID            string   `json:"id"`
+	WorkspaceID   string   `json:"workspace_id"`
+	WorkspaceSlug string   `json:"workspace_slug,omitempty"`
+	Status        string   `json:"status"`
+	AgentID       string   `json:"agent_id"`
+	SourcePath    string   `json:"source_path"`
+	SourcePaths   []string `json:"source_paths"`
+	SchemaID      string   `json:"schema_id"`
+	Progress      int      `json:"progress"`
+	Error         string   `json:"error"`
+	ClaimedBy     string   `json:"claimed_by"`
+	CreatedAt     string   `json:"created_at"`
+	CompletedAt   *string  `json:"completed_at,omitempty"`
 }
 
 type CreateJobRequest struct {
@@ -348,6 +355,10 @@ type DaemonRegisterRequest struct {
 	RuntimeIDs         []string      `json:"runtime_ids"`
 	Runtimes           []RuntimeInfo `json:"runtimes"` // auto-detected runtime details for upsert
 	MaxConcurrentTasks int           `json:"max_concurrent_tasks"`
+}
+
+type DaemonWorkspacesResponse struct {
+	Workspaces []DaemonWorkspace `json:"workspaces"`
 }
 
 type RuntimeInfo struct {

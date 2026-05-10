@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const sessionCookieName = "sw_session"
@@ -14,19 +16,67 @@ type CLIConfig struct {
 	ServerURL     string            `json:"server_url,omitempty"`
 	WorkspaceSlug string            `json:"workspace_slug,omitempty"`
 	SessionID     string            `json:"session_id,omitempty"`
+	DaemonToken   string            `json:"daemon_token,omitempty"`
 	DaemonTokens  map[string]string `json:"daemon_tokens,omitempty"`
 }
 
 func cliConfigPath() (string, error) {
+	return cliConfigPathForProfile("")
+}
+
+func cliConfigPathForProfile(profile string) (string, error) {
+	dir, err := mulwikiProfileDir(profile)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.json"), nil
+}
+
+func mulwikiBaseDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	return filepath.Join(home, ".mulwiki", "config.json"), nil
+	return filepath.Join(home, ".mulwiki"), nil
+}
+
+func mulwikiProfileDir(profile string) (string, error) {
+	base, err := mulwikiBaseDir()
+	if err != nil {
+		return "", err
+	}
+	profile = normalizeProfile(profile)
+	if profile == "" || profile == "default" {
+		return base, nil
+	}
+	return filepath.Join(base, "profiles", profile), nil
+}
+
+func normalizeProfile(profile string) string {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "..", "-")
+	return replacer.Replace(profile)
+}
+
+func daemonHealthPortForProfile(profile string) int {
+	profile = normalizeProfile(profile)
+	if profile == "" || profile == "default" {
+		return 19515
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(profile))
+	return 19516 + int(h.Sum32()%1000)
 }
 
 func loadCLIConfig() (CLIConfig, error) {
-	path, err := cliConfigPath()
+	return loadCLIConfigForProfile("")
+}
+
+func loadCLIConfigForProfile(profile string) (CLIConfig, error) {
+	path, err := cliConfigPathForProfile(profile)
 	if err != nil {
 		return CLIConfig{}, err
 	}
@@ -45,7 +95,11 @@ func loadCLIConfig() (CLIConfig, error) {
 }
 
 func saveCLIConfig(cfg CLIConfig) error {
-	path, err := cliConfigPath()
+	return saveCLIConfigForProfile("", cfg)
+}
+
+func saveCLIConfigForProfile(profile string, cfg CLIConfig) error {
+	path, err := cliConfigPathForProfile(profile)
 	if err != nil {
 		return err
 	}

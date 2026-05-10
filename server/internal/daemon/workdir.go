@@ -38,7 +38,7 @@ func (d *Daemon) buildWorkdir(job protocol.Job, agent *protocol.Agent) (string, 
 		}
 	}
 
-	wsInfo, err := d.fetchWorkspace()
+	wsInfo, err := d.fetchWorkspace(job.WorkspaceSlug)
 	if err != nil {
 		return "", fmt.Errorf("fetch workspace: %w", err)
 	}
@@ -57,7 +57,7 @@ func (d *Daemon) buildWorkdir(job protocol.Job, agent *protocol.Agent) (string, 
 	}
 
 	if job.SchemaID != "" {
-		schema, err := d.fetchSchema(job.SchemaID)
+		schema, err := d.fetchSchema(job.WorkspaceSlug, job.SchemaID)
 		if err != nil {
 			slog.Warn("failed to fetch schema, continuing without schema content", "schema_id", job.SchemaID, "error", err)
 		} else if err := os.WriteFile(filepath.Join(workdir, "schema.md"), []byte(schema.Content), 0o644); err != nil {
