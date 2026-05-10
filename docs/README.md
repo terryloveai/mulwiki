@@ -5,6 +5,7 @@ This directory keeps long-form product, architecture, design, and implementation
 ## Product And Intent
 
 - [Product Requirements](product/prd.md)
+- [CLI Usage](cli.md)
 
 ## Architecture And Reference
 

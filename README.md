@@ -84,7 +84,14 @@ go run ./cmd/mulwiki daemon status
 go run ./cmd/mulwiki runtime list
 ```
 
-You can also run `go run ./cmd/mulwiki login --server-url http://localhost:8080 --workspace demo` if you want to authenticate the CLI separately. The CLI stores its local session in `~/.mulwiki/config.json`; the daemon uses that session to mint a workspace-scoped daemon token and register detected runtimes with the server.
+You can also use isolated CLI profiles:
+
+```bash
+go run ./cmd/mulwiki --profile dev login --server-url http://localhost:8080
+go run ./cmd/mulwiki --profile dev daemon start
+```
+
+When started without `--workspace`, the daemon discovers all workspaces available to the logged-in user and registers local runtimes in each one. See [docs/cli.md](docs/cli.md) for profile, workspace, config, and daemon usage.
 
 ## Common Commands
 

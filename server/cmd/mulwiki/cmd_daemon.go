@@ -272,9 +272,6 @@ func runDaemonForeground(cmd *cobra.Command) error {
 	if workspaceSlug == "" {
 		workspaceSlug = os.Getenv("MULWIKI_WORKSPACE")
 	}
-	if workspaceSlug == "" {
-		workspaceSlug = cliCfg.WorkspaceSlug
-	}
 	workspaceSlug = strings.TrimSpace(workspaceSlug)
 
 	// Build configuration.
