@@ -107,3 +107,48 @@ func TestDaemonTokenRejectsRevokedExpiredAndMalformedTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestUserScopedDaemonTokenIdentity(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`
+		CREATE TABLE daemon_tokens (
+			id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+			workspace_id TEXT NOT NULL,
+			user_id TEXT NOT NULL DEFAULT '',
+			scope TEXT NOT NULL DEFAULT 'workspace',
+			daemon_id TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			expires_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			revoked_at TEXT
+		);
+	`); err != nil {
+		t.Fatalf("create daemon_tokens: %v", err)
+	}
+
+	raw, hash, err := NewDaemonToken()
+	if err != nil {
+		t.Fatalf("new token: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO daemon_tokens (workspace_id, user_id, scope, daemon_id, token_hash) VALUES ('anchor-ws', 'user-1', 'user', 'daemon-1', ?)`,
+		hash,
+	); err != nil {
+		t.Fatalf("insert token: %v", err)
+	}
+
+	identity, ok, err := VerifyDaemonTokenIdentity(context.Background(), db, raw)
+	if err != nil {
+		t.Fatalf("verify token: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected token to verify")
+	}
+	if identity.Scope != "user" || identity.UserID != "user-1" || identity.WorkspaceID != "anchor-ws" || identity.DaemonID != "daemon-1" {
+		t.Fatalf("unexpected identity: %+v", identity)
+	}
+}

@@ -114,7 +114,7 @@ func main() {
 
 	// CORS
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:5173"},
+		AllowedOrigins:   allowedOrigins(os.Getenv("ALLOWED_ORIGINS")),
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-User-ID", "X-Daemon-ID"},
 		AllowCredentials: true,
@@ -158,6 +158,7 @@ func main() {
 	r.Route("/api/daemon", func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(db))
 		r.Get("/", h.ListDaemons)
+		r.Get("/workspaces", h.ListDaemonWorkspaces)
 		r.Post("/register", h.DaemonRegister)
 		r.Post("/heartbeat", h.DaemonHeartbeat)
 		r.Get("/stale", h.DaemonStale)
@@ -168,6 +169,7 @@ func main() {
 		r.Post("/start", h.StartDaemon)
 		r.Route("/workspaces/{slug}", func(r chi.Router) {
 			r.Use(middleware.Workspace(db))
+			r.Use(middleware.RequireDaemonWorkspaceAccess(db))
 			r.Get("/", h.GetWorkspace)
 			r.Get("/schemas/{id}", h.GetSchema)
 			r.Get("/agents/runtimes/{id}", h.GetRuntime)
@@ -227,7 +229,28 @@ func newHTTPServer(port string, handler http.Handler) *http.Server {
 	}
 }
 
+func allowedOrigins(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return []string{"http://localhost:3000", "http://localhost:5173"}
+	}
+
+	parts := strings.Split(value, ",")
+	origins := make([]string, 0, len(parts))
+	for _, part := range parts {
+		origin := strings.TrimSpace(part)
+		if origin == "" {
+			continue
+		}
+		origins = append(origins, origin)
+	}
+	if len(origins) == 0 {
+		return []string{"http://localhost:3000", "http://localhost:5173"}
+	}
+	return origins
+}
+
 func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
+	r.With(middleware.Auth(db)).Post("/api/daemon-tokens", h.CreateUserDaemonToken)
 	r.Route("/api/workspaces", func(r chi.Router) {
 		r.Use(middleware.Auth(db))
 		r.Get("/", h.ListWorkspaces)
@@ -429,6 +452,12 @@ func runMigrations(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_messages_task_seq ON agent_task_messages(task_id, seq) WHERE seq > 0`); err != nil {
 		return fmt.Errorf("create agent_task_messages seq index: %w", err)
 	}
+	if err := ensureColumn(db, "daemon_tokens", "user_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "daemon_tokens", "scope", "TEXT NOT NULL DEFAULT 'workspace'"); err != nil {
+		return err
+	}
 
 	slog.Info("migrations applied successfully")
 
@@ -483,6 +512,14 @@ func migrateSchemasToGit(db *sql.DB) error {
 		if _, err := db.Exec("ALTER TABLE workspaces ADD COLUMN active_schema_path TEXT NOT NULL DEFAULT ''"); err != nil {
 			return fmt.Errorf("add workspaces.active_schema_path: %w", err)
 		}
+	}
+	hasConfig, err := hasColumn(db, "schemas", "config")
+	if err != nil {
+		return err
+	}
+	if !hasConfig {
+		slog.Debug("schema-to-git migration skipped; legacy config column is absent")
+		return nil
 	}
 
 	// Check if already migrated
@@ -554,17 +591,26 @@ func findReposDir() string {
 }
 
 func ensureColumn(db *sql.DB, table, column, definition string) error {
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
-		return fmt.Errorf("check column %s.%s: %w", table, column, err)
+	exists, err := hasColumn(db, table, column)
+	if err != nil {
+		return err
 	}
-	if count > 0 {
+	if exists {
 		return nil
 	}
 	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
 		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	var count int
+	query := fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?", table)
+	if err := db.QueryRow(query, column).Scan(&count); err != nil {
+		return false, fmt.Errorf("check column %s.%s: %w", table, column, err)
+	}
+	return count > 0, nil
 }
 
 func seedBuiltinSchemas(db *sql.DB, handler *handler.Handler) error {

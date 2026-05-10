@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -29,15 +28,17 @@ type AgentEntry struct {
 }
 
 type Daemon struct {
-	ServerURL     string
-	WorkspaceSlug string
-	DaemonID      string
-	DaemonToken   string
-	WorkDir       string
-	HTTPClient    *http.Client
-	ReposURL      string // git repo URL for workspace (http://backend/repos/ws-id.git)
-	RepoURL       string // direct repo URL for the configured workspace
-	HealthPort    int    // port for health HTTP server (0 = disabled)
+	ServerURL              string
+	WorkspaceSlug          string
+	WorkspaceSlugs         []string
+	AutoDiscoverWorkspaces bool
+	DaemonID               string
+	DaemonToken            string
+	WorkDir                string
+	HTTPClient             *http.Client
+	ReposURL               string // git repo URL for workspace (http://backend/repos/ws-id.git)
+	RepoURL                string // direct repo URL for the configured workspace
+	HealthPort             int    // port for health HTTP server (0 = disabled)
 
 	Agents       map[string]AgentEntry // provider → executable (populated from detected runtimes)
 	AgentTimeout time.Duration         // per-job timeout (default: 30 min)
@@ -45,20 +46,23 @@ type Daemon struct {
 	agentVersions   map[string]string
 	agentVersionsMu sync.RWMutex
 
-	startTime time.Time
-	detected  []protocol.RuntimeInfo // auto-detected runtimes
+	startTime    time.Time
+	detected     []protocol.RuntimeInfo // auto-detected runtimes
+	workspacesMu sync.RWMutex
 }
 
 // Config holds daemon configuration.
 type Config struct {
-	ServerURL     string
-	WorkspaceSlug string
-	DaemonID      string
-	DaemonToken   string
-	WorkDir       string
-	ReposURL      string        // e.g. "http://localhost:8080/repos" or "/data/repos" for local
-	HealthPort    int           // port for health HTTP server (0 = disabled)
-	AgentTimeout  time.Duration // per-job timeout (default: 30 min)
+	ServerURL              string
+	WorkspaceSlug          string
+	WorkspaceSlugs         []string
+	AutoDiscoverWorkspaces bool
+	DaemonID               string
+	DaemonToken            string
+	WorkDir                string
+	ReposURL               string        // e.g. "http://localhost:8080/repos" or "/data/repos" for local
+	HealthPort             int           // port for health HTTP server (0 = disabled)
+	AgentTimeout           time.Duration // per-job timeout (default: 30 min)
 }
 
 func New(cfg Config) *Daemon {
@@ -77,17 +81,19 @@ func New(cfg Config) *Daemon {
 		daemonID = uuid.New().String()
 	}
 	return &Daemon{
-		ServerURL:     cfg.ServerURL,
-		WorkspaceSlug: cfg.WorkspaceSlug,
-		DaemonID:      daemonID,
-		DaemonToken:   cfg.DaemonToken,
-		WorkDir:       cfg.WorkDir,
-		ReposURL:      cfg.ReposURL,
-		HealthPort:    cfg.HealthPort,
-		AgentTimeout:  cfg.AgentTimeout,
-		startTime:     time.Now(),
-		Agents:        make(map[string]AgentEntry),
-		agentVersions: make(map[string]string),
+		ServerURL:              cfg.ServerURL,
+		WorkspaceSlug:          cfg.WorkspaceSlug,
+		WorkspaceSlugs:         normalizeWorkspaceSlugs(cfg.WorkspaceSlugs, cfg.WorkspaceSlug),
+		AutoDiscoverWorkspaces: cfg.AutoDiscoverWorkspaces || (cfg.WorkspaceSlug == "" && len(cfg.WorkspaceSlugs) == 0),
+		DaemonID:               daemonID,
+		DaemonToken:            cfg.DaemonToken,
+		WorkDir:                cfg.WorkDir,
+		ReposURL:               cfg.ReposURL,
+		HealthPort:             cfg.HealthPort,
+		AgentTimeout:           cfg.AgentTimeout,
+		startTime:              time.Now(),
+		Agents:                 make(map[string]AgentEntry),
+		agentVersions:          make(map[string]string),
 		HTTPClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -126,7 +132,7 @@ func (d *Daemon) run(ctx context.Context) error {
 	slog.Info("daemon starting",
 		"server_url", d.ServerURL,
 		"daemon_id", d.DaemonID,
-		"workspace_slug", d.WorkspaceSlug,
+		"workspace_slugs", d.WorkspaceSlugs,
 	)
 
 	if err := os.MkdirAll(d.WorkDir, 0755); err != nil {
@@ -142,7 +148,7 @@ func (d *Daemon) run(ctx context.Context) error {
 	}
 	slog.Info("detected runtimes", "count", len(d.detected))
 
-	if err := d.register(d.detected); err != nil {
+	if err := d.syncWorkspacesAndRegister(d.detected); err != nil {
 		slog.Error("initial registration failed, continuing", "error", err)
 	}
 
@@ -151,6 +157,7 @@ func (d *Daemon) run(ctx context.Context) error {
 	}
 
 	go d.heartbeatLoop(d.detected)
+	go d.workspaceSyncLoop(ctx, d.detected)
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -164,18 +171,22 @@ func (d *Daemon) run(ctx context.Context) error {
 		}
 
 		slog.Debug("polling for pending jobs")
-		job, err := d.claimNextJob()
-		if err != nil {
-			slog.Error("claim job failed", "error", err)
-			continue
-		}
+		for _, slug := range d.currentWorkspaceSlugs() {
+			job, err := d.claimNextJob(slug)
+			if err != nil {
+				slog.Error("claim job failed", "workspace", slug, "error", err)
+				continue
+			}
 
-		if job == nil {
-			continue
-		}
+			if job == nil {
+				continue
+			}
+			job.WorkspaceSlug = slug
+			d.WorkspaceSlug = slug
 
-		slog.Info("claimed job", "job_id", job.ID, "agent_id", job.AgentID, "schema_id", job.SchemaID)
-		d.executeJob(*job)
+			slog.Info("claimed job", "job_id", job.ID, "workspace", slug, "agent_id", job.AgentID, "schema_id", job.SchemaID)
+			d.executeJob(*job)
+		}
 	}
 }
 
@@ -189,7 +200,7 @@ func (d *Daemon) serveHealth(ctx context.Context) {
 			"pid":        os.Getpid(),
 			"version":    "0.1.0",
 			"uptime":     time.Since(d.startTime).Truncate(time.Second).String(),
-			"workspaces": []string{d.WorkspaceSlug},
+			"workspaces": d.currentWorkspaceSlugs(),
 		}
 		runtimes := make([]map[string]any, 0, len(d.detected))
 		for _, ri := range d.detected {
@@ -218,6 +229,38 @@ func (d *Daemon) serveHealth(ctx context.Context) {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("health server error", "error", err)
 	}
+}
+
+func normalizeWorkspaceSlugs(values []string, fallback string) []string {
+	out := make([]string, 0, len(values)+1)
+	seen := map[string]bool{}
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	for _, v := range values {
+		add(v)
+	}
+	add(fallback)
+	return out
+}
+
+func (d *Daemon) currentWorkspaceSlugs() []string {
+	d.workspacesMu.RLock()
+	defer d.workspacesMu.RUnlock()
+	return append([]string(nil), d.WorkspaceSlugs...)
+}
+
+func (d *Daemon) setWorkspaceSlugs(slugs []string) {
+	d.workspacesMu.Lock()
+	d.WorkspaceSlugs = normalizeWorkspaceSlugs(slugs, "")
+	if len(d.WorkspaceSlugs) == 1 {
+		d.WorkspaceSlug = d.WorkspaceSlugs[0]
+	}
+	d.workspacesMu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -293,8 +336,70 @@ func detectVersion(binaryPath string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// register sends the daemon registration + auto-detected runtimes to the server.
-func (d *Daemon) register(runtimes []protocol.RuntimeInfo) error {
+func (d *Daemon) syncWorkspacesAndRegister(runtimes []protocol.RuntimeInfo) error {
+	slugs := d.currentWorkspaceSlugs()
+	if d.AutoDiscoverWorkspaces || len(slugs) == 0 {
+		discovered, err := d.discoverWorkspaces()
+		if err != nil {
+			return err
+		}
+		for _, ws := range discovered {
+			slugs = append(slugs, ws.Slug)
+		}
+		d.setWorkspaceSlugs(slugs)
+	}
+	if len(slugs) == 0 {
+		return fmt.Errorf("no workspaces available for daemon")
+	}
+	var firstErr error
+	for _, slug := range slugs {
+		if err := d.registerWorkspace(slug, runtimes); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			slog.Error("workspace registration failed", "workspace", slug, "error", err)
+		}
+	}
+	return firstErr
+}
+
+func (d *Daemon) workspaceSyncLoop(ctx context.Context, runtimes []protocol.RuntimeInfo) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if d.AutoDiscoverWorkspaces || len(d.currentWorkspaceSlugs()) == 0 {
+				if err := d.syncWorkspacesAndRegister(runtimes); err != nil {
+					slog.Debug("workspace sync failed", "error", err)
+				}
+			}
+		}
+	}
+}
+
+func (d *Daemon) discoverWorkspaces() ([]protocol.DaemonWorkspace, error) {
+	url := fmt.Sprintf("%s/api/daemon/workspaces", d.ServerURL)
+	resp, err := d.getDaemonJSON(url)
+	if err != nil {
+		return nil, fmt.Errorf("http get daemon workspaces: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("discover workspaces returned status %d: %s", resp.StatusCode, string(body))
+	}
+	var out protocol.DaemonWorkspacesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode daemon workspaces: %w", err)
+	}
+	return out.Workspaces, nil
+}
+
+// registerWorkspace sends the daemon registration + auto-detected runtimes to the server.
+func (d *Daemon) registerWorkspace(workspaceSlug string, runtimes []protocol.RuntimeInfo) error {
 	hostname, _ := os.Hostname()
 
 	req := protocol.DaemonRegisterRequest{
@@ -302,7 +407,7 @@ func (d *Daemon) register(runtimes []protocol.RuntimeInfo) error {
 		Hostname:           hostname,
 		PID:                os.Getpid(),
 		Version:            "0.1.0",
-		WorkspaceSlug:      d.WorkspaceSlug,
+		WorkspaceSlug:      workspaceSlug,
 		Runtimes:           runtimes,
 		MaxConcurrentTasks: 3,
 		RuntimeIDs:         []string{}, // server fills these from upserted runtimes
@@ -333,10 +438,16 @@ func (d *Daemon) register(runtimes []protocol.RuntimeInfo) error {
 
 	slog.Info("registered with server",
 		"daemon_id", d.DaemonID,
+		"workspace", workspaceSlug,
 		"runtime_count", len(reg.RuntimeIDs),
 	)
 
 	return nil
+}
+
+// register preserves the single-workspace test/helper API.
+func (d *Daemon) register(runtimes []protocol.RuntimeInfo) error {
+	return d.syncWorkspacesAndRegister(runtimes)
 }
 
 func (d *Daemon) postJSON(url string, body io.Reader) (*http.Response, error) {
@@ -409,8 +520,9 @@ func (d *Daemon) heartbeatLoop(runtimes []protocol.RuntimeInfo) {
 }
 
 // claimNextJob claims the next pending job from the server.
-func (d *Daemon) claimNextJob() (*protocol.Job, error) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/claim", d.ServerURL, d.WorkspaceSlug)
+func (d *Daemon) claimNextJob(workspaceSlug ...string) (*protocol.Job, error) {
+	slug := d.workspaceSlugForCall(workspaceSlug...)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/claim", d.ServerURL, slug)
 
 	body := map[string]string{"daemon_id": d.DaemonID}
 	jsonBody, err := json.Marshal(body)
@@ -435,7 +547,22 @@ func (d *Daemon) claimNextJob() (*protocol.Job, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&j); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
+	j.WorkspaceSlug = slug
 	return &j, nil
+}
+
+func (d *Daemon) workspaceSlugForCall(slug ...string) string {
+	if len(slug) > 0 && strings.TrimSpace(slug[0]) != "" {
+		return strings.TrimSpace(slug[0])
+	}
+	if d.WorkspaceSlug != "" {
+		return d.WorkspaceSlug
+	}
+	slugs := d.currentWorkspaceSlugs()
+	if len(slugs) > 0 {
+		return slugs[0]
+	}
+	return ""
 }
 
 // executeJob runs a claimed job using the agent execution pipeline.
@@ -444,7 +571,7 @@ func (d *Daemon) claimNextJob() (*protocol.Job, error) {
 func (d *Daemon) executeJob(job protocol.Job) {
 	jobDir := filepath.Join(d.WorkDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
-		d.failJob(job.ID, fmt.Sprintf("create job dir: %v", err))
+		d.failJob(job, fmt.Sprintf("create job dir: %v", err))
 		return
 	}
 	defer os.RemoveAll(jobDir)
@@ -452,7 +579,7 @@ func (d *Daemon) executeJob(job protocol.Job) {
 	slog.Info("executing job", "job_id", job.ID, "agent_id", job.AgentID, "schema_id", job.SchemaID)
 
 	if job.AgentID == "" {
-		d.failJob(job.ID, "no agent assigned — jobs require an agent to execute the schema pipeline")
+		d.failJob(job, "no agent assigned — jobs require an agent to execute the schema pipeline")
 		return
 	}
 
@@ -473,22 +600,25 @@ func (d *Daemon) executeJob(job protocol.Job) {
 //  6. On success: parse manifest.json, merge output into wiki
 //  7. On failure: update agent_tasks with error, retry if attempts remain
 func (d *Daemon) runAgentJob(job protocol.Job, jobDir string) {
+	if job.WorkspaceSlug != "" {
+		d.WorkspaceSlug = job.WorkspaceSlug
+	}
 	// 1. Fetch agent configuration.
-	agentCfg, err := d.fetchAgent(job.AgentID)
+	agentCfg, err := d.fetchAgent(job.WorkspaceSlug, job.AgentID)
 	if err != nil {
-		d.failJob(job.ID, fmt.Sprintf("fetch agent: %v", err))
+		d.failJob(job, fmt.Sprintf("fetch agent: %v", err))
 		return
 	}
 
 	if agentCfg.RuntimeID == "" {
-		d.failJob(job.ID, "agent has no runtime configured")
+		d.failJob(job, "agent has no runtime configured")
 		return
 	}
 
 	// 2. Fetch runtime configuration.
-	runtime, err := d.fetchRuntime(agentCfg.RuntimeID)
+	runtime, err := d.fetchRuntime(job.WorkspaceSlug, agentCfg.RuntimeID)
 	if err != nil {
-		d.failJob(job.ID, fmt.Sprintf("fetch runtime: %v", err))
+		d.failJob(job, fmt.Sprintf("fetch runtime: %v", err))
 		return
 	}
 
@@ -499,16 +629,16 @@ func (d *Daemon) runAgentJob(job protocol.Job, jobDir string) {
 		entry = AgentEntry{Path: runtime.Path}
 	}
 	if entry.Path == "" {
-		d.failJob(job.ID, fmt.Sprintf("no executable path for provider %q", runtime.Backend))
+		d.failJob(job, fmt.Sprintf("no executable path for provider %q", runtime.Backend))
 		return
 	}
 
-	d.updateProgress(job.ID, 5)
+	d.updateProgress(job, 5)
 
 	// 4. Create agent task record.
 	task, err := d.createTask(job, agentCfg, runtime)
 	if err != nil {
-		d.failJob(job.ID, fmt.Sprintf("create task: %v", err))
+		d.failJob(job, fmt.Sprintf("create task: %v", err))
 		return
 	}
 	slog.Info("agent task created", "task_id", task.ID, "agent_id", agentCfg.ID)
@@ -533,7 +663,7 @@ func (d *Daemon) runAgentJob(job protocol.Job, jobDir string) {
 	}
 
 	// All attempts exhausted.
-	d.failJob(job.ID, "all agent attempts exhausted")
+	d.failJob(job, "all agent attempts exhausted")
 }
 
 // runAgentAttempt executes a single attempt via the agent.Backend interface.
@@ -542,17 +672,17 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 	// Build isolated workdir.
 	workdir, err := d.buildWorkdir(job, agentCfg)
 	if err != nil {
-		d.failJob(job.ID, fmt.Sprintf("build workdir: %v", err))
+		d.failJob(job, fmt.Sprintf("build workdir: %v", err))
 		d.markTaskFailed(agentCfg.ID, task.ID, attempt, fmt.Sprintf("build workdir: %v", err))
 		return
 	}
 	defer os.RemoveAll(workdir)
 
-	d.updateProgress(job.ID, 15)
+	d.updateProgress(job, 15)
 
 	// Mark task as started.
-	d.markTaskStarted(agentCfg.ID, task.ID, workdir)
-	d.updateProgress(job.ID, 20)
+	d.markTaskStarted(job.WorkspaceSlug, agentCfg.ID, task.ID, workdir)
+	d.updateProgress(job, 20)
 
 	// Build agent environment.
 	agentEnv := make(map[string]string)
@@ -581,7 +711,7 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 		Logger:         slog.Default(),
 	})
 	if err != nil {
-		d.failJob(job.ID, fmt.Sprintf("create agent backend: %v", err))
+		d.failJob(job, fmt.Sprintf("create agent backend: %v", err))
 		d.markTaskFailed(agentCfg.ID, task.ID, attempt, fmt.Sprintf("create agent backend: %v", err))
 		return
 	}
@@ -625,9 +755,9 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 		return
 	}
 
-	d.updateProgress(job.ID, 25)
+	d.updateProgress(job, 25)
 
-	batcher := newTaskMessageBatcher(d, job.ID, task.ID, workdir, 500*time.Millisecond)
+	batcher := newTaskMessageBatcher(d, job.WorkspaceSlug, job.ID, task.ID, workdir, 500*time.Millisecond)
 	messagesDone := make(chan struct{})
 
 	// Drain messages while waiting for the final result.
@@ -652,7 +782,7 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 	// Handle result status.
 	switch result.Status {
 	case "completed":
-		d.updateProgress(job.ID, 85)
+		d.updateProgress(job, 85)
 
 		// Collect output from workdir and merge into wiki.
 		outputStr, err := d.collectOutput(workdir, job, task)
@@ -663,10 +793,10 @@ func (d *Daemon) runAgentAttempt(job protocol.Job, agentCfg *protocol.Agent, run
 			return
 		}
 
-		d.markTaskCompleted(agentCfg.ID, task.ID, outputStr, result.SessionID, workdir)
+		d.markTaskCompleted(job.WorkspaceSlug, agentCfg.ID, task.ID, outputStr, result.SessionID, workdir)
 		task.Status = "completed"
-		d.updateProgress(job.ID, 100)
-		d.completeJob(job.ID)
+		d.updateProgress(job, 100)
+		d.completeJob(job)
 		slog.Info("agent job completed", "job_id", job.ID, "task_id", task.ID, "attempt", attempt,
 			"duration_ms", result.DurationMs, "session_id", result.SessionID)
 
@@ -732,8 +862,14 @@ func (d *Daemon) buildPrompt(job protocol.Job, agentCfg *protocol.Agent) string 
 // ---------------------------------------------------------------------------
 
 // fetchAgent retrieves an agent's full configuration from the server.
-func (d *Daemon) fetchAgent(agentID string) (*protocol.Agent, error) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s", d.ServerURL, d.WorkspaceSlug, agentID)
+func (d *Daemon) fetchAgent(workspaceSlugOrAgentID string, agentID ...string) (*protocol.Agent, error) {
+	slug := d.workspaceSlugForCall()
+	id := workspaceSlugOrAgentID
+	if len(agentID) > 0 {
+		slug = d.workspaceSlugForCall(workspaceSlugOrAgentID)
+		id = agentID[0]
+	}
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s", d.ServerURL, slug, id)
 	resp, err := d.getDaemonJSON(url)
 	if err != nil {
 		return nil, fmt.Errorf("http get agent: %w", err)
@@ -754,8 +890,14 @@ func (d *Daemon) fetchAgent(agentID string) (*protocol.Agent, error) {
 }
 
 // fetchRuntime retrieves a runtime's configuration from the server.
-func (d *Daemon) fetchRuntime(runtimeID string) (*protocol.AgentRuntime, error) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/runtimes/%s", d.ServerURL, d.WorkspaceSlug, runtimeID)
+func (d *Daemon) fetchRuntime(workspaceSlugOrRuntimeID string, runtimeID ...string) (*protocol.AgentRuntime, error) {
+	slug := d.workspaceSlugForCall()
+	id := workspaceSlugOrRuntimeID
+	if len(runtimeID) > 0 {
+		slug = d.workspaceSlugForCall(workspaceSlugOrRuntimeID)
+		id = runtimeID[0]
+	}
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/runtimes/%s", d.ServerURL, slug, id)
 	resp, err := d.getDaemonJSON(url)
 	if err != nil {
 		return nil, fmt.Errorf("http get runtime: %w", err)
@@ -776,8 +918,14 @@ func (d *Daemon) fetchRuntime(runtimeID string) (*protocol.AgentRuntime, error) 
 }
 
 // fetchSchema retrieves schema configuration from the server.
-func (d *Daemon) fetchSchema(schemaID string) (*protocol.Schema, error) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/schemas/%s", d.ServerURL, d.WorkspaceSlug, schemaID)
+func (d *Daemon) fetchSchema(workspaceSlugOrSchemaID string, schemaID ...string) (*protocol.Schema, error) {
+	slug := d.workspaceSlugForCall()
+	id := workspaceSlugOrSchemaID
+	if len(schemaID) > 0 {
+		slug = d.workspaceSlugForCall(workspaceSlugOrSchemaID)
+		id = schemaID[0]
+	}
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/schemas/%s", d.ServerURL, slug, id)
 	resp, err := d.getDaemonJSON(url)
 	if err != nil {
 		return nil, fmt.Errorf("http get schema: %w", err)
@@ -865,7 +1013,7 @@ func (d *Daemon) buildAgentsMD(agent *protocol.Agent, job protocol.Job) string {
 
 // createTask creates an agent_tasks record via the server API.
 func (d *Daemon) createTask(job protocol.Job, agent *protocol.Agent, runtime *protocol.AgentRuntime) (*protocol.AgentTask, error) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s/tasks", d.ServerURL, d.WorkspaceSlug, agent.ID)
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s/tasks", d.ServerURL, d.workspaceSlugForJob(job), agent.ID)
 
 	body := map[string]interface{}{
 		"job_id":       job.ID,
@@ -922,8 +1070,8 @@ func (d *Daemon) createTask(job protocol.Job, agent *protocol.Agent, runtime *pr
 }
 
 // updateTask sends a PATCH to update the task's status/result/error.
-func (d *Daemon) patchTask(agentID, taskID string, body map[string]interface{}) error {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s/tasks/%s", d.ServerURL, d.WorkspaceSlug, agentID, taskID)
+func (d *Daemon) patchTask(agentID, taskID string, body map[string]interface{}, workspaceSlug ...string) error {
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/agents/%s/tasks/%s", d.ServerURL, d.workspaceSlugForCall(workspaceSlug...), agentID, taskID)
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -946,7 +1094,7 @@ func (d *Daemon) patchTask(agentID, taskID string, body map[string]interface{}) 
 	return nil
 }
 
-func (d *Daemon) updateTask(agentID, taskID string, status, result, errMsg string, attempt int, sessionID, workDir string) error {
+func (d *Daemon) updateTask(agentID, taskID string, status, result, errMsg string, attempt int, sessionID, workDir string, workspaceSlug ...string) error {
 	body := map[string]interface{}{}
 	if status != "" {
 		body["status"] = status
@@ -982,7 +1130,7 @@ func (d *Daemon) updateTask(agentID, taskID string, status, result, errMsg strin
 		}
 	}
 
-	return d.patchTask(agentID, taskID, body)
+	return d.patchTask(agentID, taskID, body, workspaceSlug...)
 }
 
 func taskStatusMessage(status, result, errMsg string) string {
@@ -999,11 +1147,12 @@ func taskStatusMessage(status, result, errMsg string) string {
 }
 
 type taskMessageBatcher struct {
-	d        *Daemon
-	jobID    string
-	taskID   string
-	workDir  string
-	interval time.Duration
+	d             *Daemon
+	workspaceSlug string
+	jobID         string
+	taskID        string
+	workDir       string
+	interval      time.Duration
 
 	mu            sync.Mutex
 	nextSeq       int64
@@ -1013,15 +1162,33 @@ type taskMessageBatcher struct {
 	closeOnce     sync.Once
 }
 
-func newTaskMessageBatcher(d *Daemon, jobID, taskID, workDir string, interval time.Duration) *taskMessageBatcher {
+func newTaskMessageBatcher(d *Daemon, args ...any) *taskMessageBatcher {
+	workspaceSlug := ""
+	jobID := ""
+	taskID := ""
+	workDir := ""
+	interval := 0 * time.Millisecond
+	if len(args) == 4 {
+		jobID, _ = args[0].(string)
+		taskID, _ = args[1].(string)
+		workDir, _ = args[2].(string)
+		interval, _ = args[3].(time.Duration)
+	} else if len(args) >= 5 {
+		workspaceSlug, _ = args[0].(string)
+		jobID, _ = args[1].(string)
+		taskID, _ = args[2].(string)
+		workDir, _ = args[3].(string)
+		interval, _ = args[4].(time.Duration)
+	}
 	b := &taskMessageBatcher{
-		d:        d,
-		jobID:    jobID,
-		taskID:   taskID,
-		workDir:  workDir,
-		interval: interval,
-		nextSeq:  1,
-		done:     make(chan struct{}),
+		d:             d,
+		workspaceSlug: workspaceSlug,
+		jobID:         jobID,
+		taskID:        taskID,
+		workDir:       workDir,
+		interval:      interval,
+		nextSeq:       1,
+		done:          make(chan struct{}),
 	}
 	if interval > 0 {
 		go b.loop()
@@ -1057,7 +1224,7 @@ func (b *taskMessageBatcher) Add(msg agent.Message) {
 		return
 	}
 
-	b.d.postLogLine(b.jobID, string(msg.Type), content)
+	b.d.postLogLine(b.jobID, string(msg.Type), content, b.workspaceSlug)
 	if msg.SessionID != "" {
 		b.pinSession(msg.SessionID)
 	}
@@ -1177,15 +1344,35 @@ func (d *Daemon) pinTaskSession(taskID, sessionID, workDir string) error {
 }
 
 // markTaskRunning marks the task as "running" (valid per DB CHECK constraint).
-func (d *Daemon) markTaskStarted(agentID, taskID, workDir string) {
-	if err := d.updateTask(agentID, taskID, "running", "", "", 0, "", workDir); err != nil {
+func (d *Daemon) markTaskStarted(args ...string) {
+	workspaceSlug := ""
+	agentID := ""
+	taskID := ""
+	workDir := ""
+	if len(args) == 3 {
+		agentID, taskID, workDir = args[0], args[1], args[2]
+	} else if len(args) >= 4 {
+		workspaceSlug, agentID, taskID, workDir = args[0], args[1], args[2], args[3]
+	}
+	if err := d.updateTask(agentID, taskID, "running", "", "", 0, "", workDir, workspaceSlug); err != nil {
 		slog.Error("mark task started failed", "task_id", taskID, "error", err)
 	}
 }
 
 // markTaskCompleted marks the task as "completed" with a result summary.
-func (d *Daemon) markTaskCompleted(agentID, taskID, result, sessionID, workDir string) {
-	if err := d.updateTask(agentID, taskID, "completed", result, "", 0, sessionID, workDir); err != nil {
+func (d *Daemon) markTaskCompleted(args ...string) {
+	workspaceSlug := ""
+	agentID := ""
+	taskID := ""
+	result := ""
+	sessionID := ""
+	workDir := ""
+	if len(args) == 5 {
+		agentID, taskID, result, sessionID, workDir = args[0], args[1], args[2], args[3], args[4]
+	} else if len(args) >= 6 {
+		workspaceSlug, agentID, taskID, result, sessionID, workDir = args[0], args[1], args[2], args[3], args[4], args[5]
+	}
+	if err := d.updateTask(agentID, taskID, "completed", result, "", 0, sessionID, workDir, workspaceSlug); err != nil {
 		slog.Error("mark task completed failed", "task_id", taskID, "error", err)
 	}
 }
@@ -1205,84 +1392,9 @@ func (d *Daemon) markTaskFailed(agentID, taskID string, attempt int, errMsg stri
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Workdir construction
-// ---------------------------------------------------------------------------
-
-// buildWorkdir creates the isolated workdir for an agent job using git.
-//
-// Instead of copying individual files over HTTP, the daemon:
-//  1. Clones the workspace's bare git repo (or fetches if already cached)
-//  2. Creates a git worktree from the bare clone into the job's workdir
-//  3. Writes schema.md (wiki type/layer taxonomy — from DB)
-//  4. Writes AGENTS.md (platform protocol + agent identity — generated dynamically)
-//
-// The agent sees a complete file tree:
-//
-//	/tmp/mulwiki-job-{jobID}/
-//	├── AGENTS.md          ← Platform protocol + Agent identity
-//	├── schema.md          ← Wiki schema definition (type/layer taxonomy)
-//	├── sources/           ← All source documents
-//	├── wiki/              ← Existing wiki pages (as .md files)
-//	├── schemas/           ← Schema definitions
-//	└── output/            ← Agent writes output here
-func (d *Daemon) buildWorkdir(job protocol.Job, agent *protocol.Agent) (string, error) {
-	workdir := filepath.Join(os.TempDir(), fmt.Sprintf("mulwiki-job-%s", job.ID))
-
-	// Clean up stale workdir.
-	if _, err := os.Stat(workdir); err == nil {
-		slog.Warn("removing stale workdir", "workdir", workdir)
-		if err := os.RemoveAll(workdir); err != nil {
-			return "", fmt.Errorf("cleanup stale workdir: %w", err)
-		}
-	}
-
-	// Fetch workspace ID to build the repo path.
-	wsInfo, err := d.fetchWorkspace()
-	if err != nil {
-		return "", fmt.Errorf("fetch workspace: %w", err)
-	}
-
-	// Clone or fetch the workspace git repo.
-	barePath, err := d.ensureRepo(wsInfo.ID)
-	if err != nil {
-		return "", fmt.Errorf("ensure repo: %w", err)
-	}
-
-	// Create worktree from bare clone.
-	if err := d.createWorktree(barePath, workdir, job.ID); err != nil {
-		return "", fmt.Errorf("create worktree: %w", err)
-	}
-
-	// Create output dir.
-	if err := os.MkdirAll(filepath.Join(workdir, "output"), 0755); err != nil {
-		return "", fmt.Errorf("create output dir: %w", err)
-	}
-
-	// --- schema.md: wiki taxonomy (separate from AGENTS.md) ---
-	if job.SchemaID != "" {
-		schema, err := d.fetchSchema(job.SchemaID)
-		if err != nil {
-			slog.Warn("failed to fetch schema, continuing without schema content", "schema_id", job.SchemaID, "error", err)
-		} else {
-			if err := os.WriteFile(filepath.Join(workdir, "schema.md"), []byte(schema.Content), 0644); err != nil {
-				return "", fmt.Errorf("write schema.md: %w", err)
-			}
-		}
-	}
-
-	// --- AGENTS.md: platform protocol + agent identity ---
-	agentsMD := d.buildAgentsMD(agent, job)
-	if err := os.WriteFile(filepath.Join(workdir, "AGENTS.md"), []byte(agentsMD), 0644); err != nil {
-		return "", fmt.Errorf("write AGENTS.md: %w", err)
-	}
-
-	return workdir, nil
-}
-
 // fetchWorkspace retrieves workspace metadata.
-func (d *Daemon) fetchWorkspace() (*protocol.Workspace, error) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s", d.ServerURL, d.WorkspaceSlug)
+func (d *Daemon) fetchWorkspace(workspaceSlug ...string) (*protocol.Workspace, error) {
+	url := fmt.Sprintf("%s/api/daemon/workspaces/%s", d.ServerURL, d.workspaceSlugForCall(workspaceSlug...))
 	resp, err := d.getDaemonJSON(url)
 	if err != nil {
 		return nil, fmt.Errorf("http get workspace: %w", err)
@@ -1298,303 +1410,4 @@ func (d *Daemon) fetchWorkspace() (*protocol.Workspace, error) {
 		return nil, fmt.Errorf("decode workspace: %w", err)
 	}
 	return &ws, nil
-}
-
-// ensureRepo clones or fetches the workspace git repo into a local bare cache.
-// Returns the path to the bare clone.
-func (d *Daemon) ensureRepo(workspaceID string) (string, error) {
-	cacheDir := filepath.Join(d.WorkDir, ".repos")
-	barePath := filepath.Join(cacheDir, workspaceID+".git")
-
-	repoURL := d.repoURL(workspaceID)
-
-	if isBareRepo(barePath) {
-		// Already cached — fetch latest.
-		slog.Debug("repo cached, fetching", "path", barePath, "url", repoURL)
-		cmd := exec.Command("git", "-C", barePath, "fetch", "origin")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			slog.Warn("git fetch failed (continuing with cached data)", "error", err, "output", string(out))
-		}
-	} else {
-		// First time — clone.
-		slog.Info("cloning workspace repo", "url", repoURL, "path", barePath)
-		if err := os.MkdirAll(filepath.Dir(barePath), 0755); err != nil {
-			return "", fmt.Errorf("create cache dir: %w", err)
-		}
-		os.RemoveAll(barePath) // Clean any partial.
-
-		cmd := exec.Command("git", "clone", "--bare", repoURL, barePath)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("git clone --bare: %s: %w", strings.TrimSpace(string(out)), err)
-		}
-	}
-
-	return barePath, nil
-}
-
-// repoURL returns the git URL for a workspace's bare repo.
-// If ReposURL starts with "http", it's a remote HTTP git server.
-// Otherwise, it's a local filesystem path.
-func (d *Daemon) repoURL(workspaceID string) string {
-	if strings.HasPrefix(d.ReposURL, "http") {
-		return strings.TrimRight(d.ReposURL, "/") + "/" + workspaceID + ".git"
-	}
-	return filepath.Join(d.ReposURL, workspaceID+".git")
-}
-
-// createWorktree creates a git worktree from a bare clone into the target directory.
-func (d *Daemon) createWorktree(barePath, workdir, jobID string) error {
-	branchName := fmt.Sprintf("job/%s", shortJobID(jobID))
-
-	// Prune stale worktree references from previous attempts, then delete the branch.
-	_ = exec.Command("git", "-C", barePath, "worktree", "prune").Run()
-	_ = exec.Command("git", "-C", barePath, "branch", "-D", branchName).Run()
-
-	cmd := exec.Command("git", "-C", barePath, "worktree", "add", "-b", branchName, workdir, "HEAD")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git worktree add: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-
-	slog.Debug("worktree created", "bare", barePath, "workdir", workdir, "branch", branchName)
-	return nil
-}
-
-func isBareRepo(path string) bool {
-	_, err := os.Stat(filepath.Join(path, "HEAD"))
-	return err == nil
-}
-
-func shortJobID(jobID string) string {
-	s := strings.ReplaceAll(jobID, "-", "")
-	if len(s) > 8 {
-		return s[:8]
-	}
-	return s
-}
-
-// ---------------------------------------------------------------------------
-// Output collection
-// ---------------------------------------------------------------------------
-
-// collectOutput reads output/manifest.json, bundles referenced files, and delivers to server.
-// The daemon does not interpret page types, layers, or the output format — that is the server's concern.
-func (d *Daemon) collectOutput(workdir string, job protocol.Job, _ *protocol.AgentTask) (string, error) {
-	manifestPath := filepath.Join(workdir, "output", "manifest.json")
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return "", fmt.Errorf("read manifest.json: %w (agent may not have written output)", err)
-	}
-
-	var manifest struct {
-		Pages []struct {
-			Path  string `json:"path"`
-			Title string `json:"title"`
-			Type  string `json:"type"`
-			Layer string `json:"layer"`
-		} `json:"pages"`
-	}
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return "", fmt.Errorf("parse manifest.json: %w", err)
-	}
-
-	if len(manifest.Pages) == 0 {
-		return "no pages in manifest", nil
-	}
-
-	type pageOut struct {
-		Path    string `json:"path"`
-		Title   string `json:"title"`
-		Type    string `json:"type"`
-		Layer   string `json:"layer"`
-		Content string `json:"content"`
-	}
-	pages := make([]pageOut, 0, len(manifest.Pages))
-	for _, p := range manifest.Pages {
-		content, err := os.ReadFile(filepath.Join(workdir, "output", p.Path))
-		if err != nil {
-			slog.Warn("failed to read output file, skipping", "path", p.Path, "error", err)
-			continue
-		}
-		pages = append(pages, pageOut{p.Path, p.Title, p.Type, p.Layer, string(content)})
-	}
-
-	payload := struct {
-		JobID string    `json:"job_id"`
-		Pages []pageOut `json:"pages"`
-	}{job.ID, pages}
-
-	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/output", d.ServerURL, d.WorkspaceSlug, job.ID)
-	resp, err := d.postJSON(url, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("deliver output: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("server rejected output: %d %s", resp.StatusCode, string(body))
-	}
-
-	return fmt.Sprintf("pages=%d", len(pages)), nil
-}
-
-// ---------------------------------------------------------------------------
-// Subprocess helpers
-// ---------------------------------------------------------------------------
-
-// mergeEnv merges the parent environment with the agent's custom environment.
-// Custom values override parent values. Values containing potential secrets
-// with keys matching *_SECRET, *_KEY, *_TOKEN, *_PASSWORD are logged safely.
-func (d *Daemon) mergeEnv(parent []string, custom map[string]string) []string {
-	// Start with parent env.
-	merged := make([]string, len(parent))
-	copy(merged, parent)
-
-	// Override or append custom env vars.
-	for k, v := range custom {
-		idx := -1
-		prefix := k + "="
-		for i, envVar := range merged {
-			if len(envVar) >= len(prefix) && envVar[:len(prefix)] == prefix {
-				idx = i
-				break
-			}
-		}
-		newVal := prefix + v
-		if idx >= 0 {
-			merged[idx] = newVal
-		} else {
-			merged = append(merged, newVal)
-		}
-
-		// Never log secret values in clear text.
-		if isSecretKey(k) {
-			slog.Debug("set env", "key", k, "value", "***")
-		} else {
-			slog.Debug("set env", "key", k, "value", v)
-		}
-	}
-
-	return merged
-}
-
-// isSecretKey returns true if the key name suggests it contains a secret.
-func isSecretKey(key string) bool {
-	upper := strings.ToUpper(key)
-	return strings.Contains(upper, "SECRET") ||
-		strings.Contains(upper, "KEY") ||
-		strings.Contains(upper, "TOKEN") ||
-		strings.Contains(upper, "PASSWORD") ||
-		strings.Contains(upper, "API_KEY")
-}
-
-// streamLogs reads from an io.Reader line-by-line and forwards each line as a
-// server-side log entry via HTTP POST, tagged with the job and stream name.
-func (d *Daemon) streamLogs(reader io.Reader, jobID, stream string) {
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := scanner.Text()
-		slog.Debug("agent log", "job_id", jobID, "stream", stream, "line", line)
-		// Stream to server for real-time SSE.
-		d.postLogLine(jobID, stream, line)
-	}
-	if err := scanner.Err(); err != nil {
-		slog.Warn("agent log stream error", "job_id", jobID, "stream", stream, "error", err)
-	}
-}
-
-// postLogLine sends a single log line to the server's log buffer for SSE streaming.
-func (d *Daemon) postLogLine(jobID, stream, line string) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/log-line", d.ServerURL, d.WorkspaceSlug, jobID)
-	body := map[string]string{
-		"stream": stream,
-		"line":   line,
-	}
-	jsonBody, _ := json.Marshal(body)
-	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
-	if err != nil {
-		slog.Debug("post log line failed", "error", err)
-		return
-	}
-	resp.Body.Close()
-}
-
-// ---------------------------------------------------------------------------
-// Progress and job lifecycle helpers
-// ---------------------------------------------------------------------------
-
-// updateProgress sends a progress update to the server.
-func (d *Daemon) updateProgress(jobID string, progress int) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/progress", d.ServerURL, d.WorkspaceSlug, jobID)
-	body := map[string]int{"progress": progress}
-	jsonBody, _ := json.Marshal(body)
-	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
-	if err != nil {
-		slog.Error("update progress failed", "job_id", jobID, "error", err)
-		return
-	}
-	resp.Body.Close()
-}
-
-// completeJob marks the job as completed on the server.
-func (d *Daemon) completeJob(jobID string) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/complete", d.ServerURL, d.WorkspaceSlug, jobID)
-	resp, err := d.postJSON(url, nil)
-	if err != nil {
-		slog.Error("complete job failed", "job_id", jobID, "error", err)
-		return
-	}
-	resp.Body.Close()
-	slog.Info("job completed", "job_id", jobID)
-}
-
-// failJob marks the job as failed on the server.
-func (d *Daemon) failJob(jobID, errMsg string) {
-	url := fmt.Sprintf("%s/api/daemon/workspaces/%s/jobs/%s/fail", d.ServerURL, d.WorkspaceSlug, jobID)
-	body := map[string]string{"error": errMsg}
-	jsonBody, _ := json.Marshal(body)
-	resp, err := d.postJSON(url, bytes.NewReader(jsonBody))
-	if err != nil {
-		slog.Error("fail job failed", "job_id", jobID, "error", err)
-		return
-	}
-	resp.Body.Close()
-	slog.Error("job failed", "job_id", jobID, "error", errMsg)
-}
-
-// ---------------------------------------------------------------------------
-// Utility
-// ---------------------------------------------------------------------------
-
-// copyFile copies a file from src to dst, creating the destination directory
-// if needed. Uses io.Copy for efficient streaming.
-func copyFile(src, dst string) error {
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open source: %w", err)
-	}
-	defer srcFile.Close()
-
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
-	}
-
-	dstFile, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("create dest: %w", err)
-	}
-	defer dstFile.Close()
-
-	if _, err := io.Copy(dstFile, srcFile); err != nil {
-		return fmt.Errorf("copy: %w", err)
-	}
-
-	// Preserve permissions from source.
-	srcInfo, _ := srcFile.Stat()
-	if srcInfo != nil {
-		os.Chmod(dst, srcInfo.Mode())
-	}
-
-	return nil
 }

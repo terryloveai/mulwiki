@@ -175,6 +175,8 @@ CREATE TABLE IF NOT EXISTS daemon_registrations (
 CREATE TABLE IF NOT EXISTS daemon_tokens (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL DEFAULT '',
+    scope TEXT NOT NULL DEFAULT 'workspace',
     daemon_id TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     expires_at TEXT,

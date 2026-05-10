@@ -72,9 +72,9 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		h.DB.QueryRow(`SELECT id FROM workspaces WHERE slug = ?`, req.WorkspaceSlug).Scan(&workspaceID)
 	}
 	if workspaceID == "" {
-		workspaceID = middleware.GetWorkspaceID(r)
+		workspaceID = middleware.DaemonWorkspaceIDFromContext(r.Context())
 	}
-	if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" && workspaceID != "" && workspaceID != tokenWorkspaceID {
+	if workspaceID != "" && !h.daemonCanAccessWorkspace(r, workspaceID) {
 		writeError(w, http.StatusForbidden, "workspace access denied")
 		return
 	}
@@ -131,7 +131,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		query := `UPDATE agent_runtimes SET daemon_id = ?, last_heartbeat = ?, status = 'online'
 		          WHERE id IN (` + strings.Join(placeholders, ",") + `)`
-		if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+		if tokenWorkspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context()); tokenWorkspaceID != "" {
 			query += ` AND workspace_id = ?`
 			args = append(args, tokenWorkspaceID)
 		}
@@ -164,6 +164,65 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, reg)
+}
+
+func (h *Handler) daemonCanAccessWorkspace(r *http.Request, workspaceID string) bool {
+	if workspaceID == "" {
+		return false
+	}
+	if middleware.DaemonIDFromContext(r.Context()) == "" && middleware.DaemonScopeFromContext(r.Context()) == "" {
+		return true
+	}
+	if tokenWorkspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context()); tokenWorkspaceID != "" {
+		return tokenWorkspaceID == workspaceID
+	}
+	userID := middleware.DaemonUserIDFromContext(r.Context())
+	if userID == "" {
+		return false
+	}
+	var exists int
+	err := h.DB.QueryRow(`SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?`, workspaceID, userID).Scan(&exists)
+	return err == nil
+}
+
+func (h *Handler) ListDaemonWorkspaces(w http.ResponseWriter, r *http.Request) {
+	if workspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context()); workspaceID != "" {
+		var ws protocol.DaemonWorkspace
+		if err := h.DB.QueryRow(`SELECT id, slug, name FROM workspaces WHERE id = ?`, workspaceID).Scan(&ws.ID, &ws.Slug, &ws.Name); err != nil {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, protocol.DaemonWorkspacesResponse{Workspaces: []protocol.DaemonWorkspace{ws}})
+		return
+	}
+
+	userID := middleware.DaemonUserIDFromContext(r.Context())
+	if userID == "" {
+		writeError(w, http.StatusForbidden, "daemon token is not user-scoped")
+		return
+	}
+	rows, err := h.DB.Query(
+		`SELECT w.id, w.slug, w.name
+		 FROM workspaces w
+		 JOIN workspace_members wm ON wm.workspace_id = w.id
+		 WHERE wm.user_id = ?
+		 ORDER BY w.name ASC`,
+		userID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list workspaces")
+		return
+	}
+	defer rows.Close()
+
+	resp := protocol.DaemonWorkspacesResponse{Workspaces: []protocol.DaemonWorkspace{}}
+	for rows.Next() {
+		var ws protocol.DaemonWorkspace
+		if err := rows.Scan(&ws.ID, &ws.Slug, &ws.Name); err == nil {
+			resp.Workspaces = append(resp.Workspaces, ws)
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // dedupStrings removes duplicates while preserving order.
@@ -232,7 +291,7 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 		query := `UPDATE agent_runtimes SET last_heartbeat = ?, status = 'online'
 		          WHERE id IN (` + strings.Join(placeholders, ",") + `)`
-		if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+		if tokenWorkspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context()); tokenWorkspaceID != "" {
 			query += ` AND workspace_id = ?`
 			args = append(args, tokenWorkspaceID)
 		}
@@ -242,7 +301,7 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	} else {
 		query := `UPDATE agent_runtimes SET last_heartbeat = ?, status = 'online' WHERE daemon_id = ?`
 		args := []any{now, req.ID}
-		if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+		if tokenWorkspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context()); tokenWorkspaceID != "" {
 			query += ` AND workspace_id = ?`
 			args = append(args, tokenWorkspaceID)
 		}
@@ -271,7 +330,7 @@ func (h *Handler) DaemonStale(w http.ResponseWriter, r *http.Request) {
 		WHERE (last_heartbeat < ? OR last_heartbeat = '')
 		  AND status = 'online'`
 	args := []any{cutoff}
-	if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+	if tokenWorkspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context()); tokenWorkspaceID != "" {
 		query += ` AND workspace_id = ?`
 		args = append(args, tokenWorkspaceID)
 	}
@@ -444,7 +503,7 @@ func (h *Handler) StopDaemon(w http.ResponseWriter, r *http.Request) {
 		if err := proc.Kill(); err != nil {
 			// Process already dead — still clear heartbeat
 			h.DB.Exec(`UPDATE daemon_registrations SET pid = 0, last_heartbeat = '1970-01-01T00:00:00Z' WHERE id = ?`, id)
-			if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+			if tokenWorkspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context()); tokenWorkspaceID != "" {
 				h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ? AND workspace_id = ?`, id, tokenWorkspaceID)
 			} else {
 				h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ?`, id)
@@ -458,7 +517,7 @@ func (h *Handler) StopDaemon(w http.ResponseWriter, r *http.Request) {
 	h.DB.Exec(`UPDATE daemon_registrations SET pid = 0, last_heartbeat = '1970-01-01T00:00:00Z' WHERE id = ?`, id)
 
 	// Mark runtimes as offline too
-	if tokenWorkspaceID := middleware.GetWorkspaceID(r); tokenWorkspaceID != "" {
+	if tokenWorkspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context()); tokenWorkspaceID != "" {
 		h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ? AND workspace_id = ?`, id, tokenWorkspaceID)
 	} else {
 		h.DB.Exec(`UPDATE agent_runtimes SET status = 'offline', last_heartbeat = '1970-01-01T00:00:00Z' WHERE daemon_id = ?`, id)

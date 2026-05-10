@@ -36,6 +36,7 @@ func addSetupFlags(cmd *cobra.Command) {
 }
 
 func runSetupSelfHost(cmd *cobra.Command, _ []string) error {
+	profile := resolveProfile(cmd)
 	serverURL, _ := cmd.Flags().GetString("server-url")
 	workspace, _ := cmd.Flags().GetString("workspace")
 	email := flagOrEnvConfig(cmd, "email", "MULWIKI_EMAIL", "", "")
@@ -56,7 +57,7 @@ func runSetupSelfHost(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	if err := setupSelfHost(serverURL, workspace, email, password, noStart); err != nil {
+	if err := setupSelfHostForProfile(profile, serverURL, workspace, email, password, noStart); err != nil {
 		return err
 	}
 	if noStart {
@@ -68,12 +69,16 @@ func runSetupSelfHost(cmd *cobra.Command, _ []string) error {
 }
 
 func setupSelfHost(serverURL, workspace, email, password string, noStart bool) error {
+	return setupSelfHostForProfile("", serverURL, workspace, email, password, noStart)
+}
+
+func setupSelfHostForProfile(profile, serverURL, workspace, email, password string, noStart bool) error {
 	serverURL = strings.TrimRight(strings.TrimSpace(serverURL), "/")
 	if serverURL == "" {
 		serverURL = "http://localhost:8080"
 	}
 
-	if _, err := loginWithCredentials(serverURL, email, password, strings.TrimSpace(workspace)); err != nil {
+	if _, err := loginWithCredentialsForProfile(profile, serverURL, email, password, strings.TrimSpace(workspace)); err != nil {
 		return err
 	}
 	if noStart {
@@ -81,6 +86,7 @@ func setupSelfHost(serverURL, workspace, email, password string, noStart bool) e
 	}
 
 	cmd := daemonStartCmd
+	cmd.Root().PersistentFlags().Set("profile", profile)
 	cmd.Flags().Set("server-url", serverURL)
 	if workspace != "" {
 		cmd.Flags().Set("workspace", workspace)

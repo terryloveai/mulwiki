@@ -1080,22 +1080,22 @@ Daemon 在 `prompt.go` 中构建完整的 agent prompt，包含：
 func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.AgentTaskQueue, error) {
     // 1. 读 agent 信息（含 max_concurrent_tasks）
     agent, err := s.Queries.GetAgent(ctx, agentID)
-    
+
     // 2. 检查并发限制
     running, _ := s.Queries.CountRunningTasks(ctx, agentID)
     if running >= int64(agent.MaxConcurrentTasks) {
         return nil, nil // 无容量
     }
-    
+
     // 3. 原子认领（FOR UPDATE SKIP LOCKED）
     task, err := s.Queries.ClaimAgentTask(ctx, agentID)
     if errors.Is(err, pgx.ErrNoRows) {
         return nil, nil // 无任务
     }
-    
+
     // 4. 刷新 agent 状态（从 active tasks 推导）
     s.ReconcileAgentStatus(ctx, agentID)
-    
+
     // 5. 广播 dispatch 事件
     s.broadcastTaskDispatch(ctx, task)
     return &task, nil
@@ -1187,13 +1187,13 @@ func RequireWorkspaceMember(queries *db.Queries) func(http.Handler) http.Handler
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             // 1. 从 slug/header/query 解析 workspace ID
             workspaceID := resolve(r)
-            
+
             // 2. 读用户 ID（由 upstream Auth 中间件设置）
             userID := r.Header.Get("X-User-ID")
-            
+
             // 3. DB 查询 membership
             member := queries.GetMemberByUserAndWorkspace(ctx, userUUID, wsUUID)
-            
+
             // 4. 注入 context
             ctx = SetMemberContext(ctx, workspaceID, member)
             next.ServeHTTP(w, r.WithContext(ctx))

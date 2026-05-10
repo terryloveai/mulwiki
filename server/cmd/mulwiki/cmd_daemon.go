@@ -83,28 +83,53 @@ const (
 )
 
 func mulwikiDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".mulwiki")
+	dir, _ := mulwikiProfileDir("")
+	return dir
+}
+
+func mulwikiDirForProfile(profile string) string {
+	dir, _ := mulwikiProfileDir(profile)
+	return dir
 }
 
 func daemonDir() string {
-	return filepath.Join(mulwikiDir(), "daemon")
+	return daemonDirForProfile("")
+}
+
+func daemonDirForProfile(profile string) string {
+	return filepath.Join(mulwikiDirForProfile(profile), "daemon")
 }
 
 func daemonPIDPath() string {
-	return filepath.Join(daemonDir(), "daemon.pid")
+	return daemonPIDPathForProfile("")
+}
+
+func daemonPIDPathForProfile(profile string) string {
+	return filepath.Join(daemonDirForProfile(profile), "daemon.pid")
 }
 
 func daemonLogPath() string {
-	return filepath.Join(daemonDir(), "daemon.log")
+	return daemonLogPathForProfile("")
+}
+
+func daemonLogPathForProfile(profile string) string {
+	return filepath.Join(daemonDirForProfile(profile), "daemon.log")
 }
 
 func daemonIDPath() string {
-	return filepath.Join(daemonDir(), "daemon.id")
+	return daemonIDPathForProfile("")
+}
+
+func daemonIDPathForProfile(profile string) string {
+	return filepath.Join(daemonDirForProfile(profile), "daemon.id")
 }
 
 func daemonTokenPath() string {
-	return filepath.Join(daemonDir(), "token")
+	return daemonTokenPathForProfile("")
+}
+
+func daemonTokenPathForProfile(profile string) string {
+	return filepath.Join(daemonDirForProfile(profile), "token")
 }
 
 // ---------------------------------------------------------------------------
@@ -120,10 +145,12 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 }
 
 func runDaemonBackground(cmd *cobra.Command) error {
+	profile := resolveProfile(cmd)
+	healthPort := daemonHealthPortForProfile(profile)
 	// Check if already running via health port.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	health := checkDaemonHealth(ctx)
+	health := checkDaemonHealth(ctx, healthPort)
 	if health["status"] == "running" {
 		pid, _ := health["pid"].(float64)
 		return fmt.Errorf("daemon is already running (pid %v)", int(pid))
@@ -139,11 +166,11 @@ func runDaemonBackground(cmd *cobra.Command) error {
 	args := buildDaemonStartArgs(cmd)
 
 	// Ensure daemon directory exists.
-	if err := os.MkdirAll(daemonDir(), 0o755); err != nil {
+	if err := os.MkdirAll(daemonDirForProfile(profile), 0o755); err != nil {
 		return fmt.Errorf("create daemon directory: %w", err)
 	}
 
-	logFile, err := os.OpenFile(daemonLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(daemonLogPathForProfile(profile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("open log file: %w", err)
 	}
@@ -175,7 +202,7 @@ func runDaemonBackground(cmd *cobra.Command) error {
 	child.Process.Release()
 
 	// Write PID file.
-	if err := os.WriteFile(daemonPIDPath(), []byte(strconv.Itoa(pid)), 0o644); err != nil {
+	if err := os.WriteFile(daemonPIDPathForProfile(profile), []byte(strconv.Itoa(pid)), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not write PID file: %v\n", err)
 	}
 
@@ -185,7 +212,7 @@ func runDaemonBackground(cmd *cobra.Command) error {
 	for time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
 		hctx, hcancel := context.WithTimeout(context.Background(), 2*time.Second)
-		health = checkDaemonHealth(hctx)
+		health = checkDaemonHealth(hctx, healthPort)
 		hcancel()
 		if health["status"] == "running" {
 			started = true
@@ -193,17 +220,20 @@ func runDaemonBackground(cmd *cobra.Command) error {
 		}
 	}
 	if !started {
-		fmt.Fprintf(os.Stderr, "Daemon may not have started successfully. Check logs:\n  %s\n", daemonLogPath())
+		fmt.Fprintf(os.Stderr, "Daemon may not have started successfully. Check logs:\n  %s\n", daemonLogPathForProfile(profile))
 		return nil
 	}
 
 	fmt.Fprintf(os.Stderr, "Daemon started (pid %d, version %s)\n", pid, version)
-	fmt.Fprintf(os.Stderr, "Logs: %s\n", daemonLogPath())
+	fmt.Fprintf(os.Stderr, "Logs: %s\n", daemonLogPathForProfile(profile))
 	return nil
 }
 
 func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	args := []string{"daemon", "start", "--foreground"}
+	if profile := resolveProfile(cmd); profile != "" {
+		args = append([]string{"--profile", profile}, args...)
+	}
 	if v, _ := cmd.Flags().GetString("server-url"); v != "" {
 		args = append(args, "--server-url", v)
 	}
@@ -223,7 +253,8 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 }
 
 func runDaemonForeground(cmd *cobra.Command) error {
-	cliCfg, _ := loadCLIConfig()
+	profile := resolveProfile(cmd)
+	cliCfg, _ := loadCLIConfigForProfile(profile)
 
 	serverURL, _ := cmd.Flags().GetString("server-url")
 	if serverURL == "" {
@@ -244,9 +275,7 @@ func runDaemonForeground(cmd *cobra.Command) error {
 	if workspaceSlug == "" {
 		workspaceSlug = cliCfg.WorkspaceSlug
 	}
-	if workspaceSlug == "" {
-		return fmt.Errorf("workspace is required: pass --workspace, set MULWIKI_WORKSPACE, or run 'mulwiki login --workspace <slug>'")
-	}
+	workspaceSlug = strings.TrimSpace(workspaceSlug)
 
 	// Build configuration.
 	reposPath, _ := cmd.Flags().GetString("repos-path")
@@ -261,34 +290,37 @@ func runDaemonForeground(cmd *cobra.Command) error {
 	daemonID, _ := cmd.Flags().GetString("daemon-id")
 	if daemonID == "" {
 		var err error
-		daemonID, err = daemon.LoadOrCreateDaemonID(daemonIDPath())
+		daemonID, err = daemon.LoadOrCreateDaemonID(daemonIDPathForProfile(profile))
 		if err != nil {
 			return fmt.Errorf("load daemon id: %w", err)
 		}
 	}
 	tokenFlag, _ := cmd.Flags().GetString("daemon-token")
-	daemonToken, err := resolveDaemonTokenForStart(tokenFlag, daemonTokenPath(), cliCfg, workspaceSlug, daemonID, serverURL)
+	daemonToken, err := resolveDaemonTokenForStartForProfile(profile, tokenFlag, daemonTokenPathForProfile(profile), cliCfg, workspaceSlug, daemonID, serverURL)
 	if err != nil {
 		return fmt.Errorf("resolve daemon token: %w", err)
 	}
 	if daemonToken == "" {
-		return fmt.Errorf("not authenticated for daemon start: run 'mulwiki login --workspace %s' or pass --daemon-token", workspaceSlug)
+		return fmt.Errorf("not authenticated for daemon start: run 'mulwiki login' or pass --daemon-token")
 	}
 
+	workspaceSlugs := splitWorkspaceSlugs(workspaceSlug)
 	cfg := daemon.Config{
-		ServerURL:     serverURL,
-		WorkspaceSlug: workspaceSlug,
-		DaemonID:      daemonID,
-		DaemonToken:   daemonToken,
-		WorkDir:       filepath.Join(os.TempDir(), "mulwiki-daemon"),
-		ReposURL:      reposPath,
-		HealthPort:    daemonHealthPort,
+		ServerURL:              serverURL,
+		WorkspaceSlug:          workspaceSlug,
+		WorkspaceSlugs:         workspaceSlugs,
+		AutoDiscoverWorkspaces: len(workspaceSlugs) == 0,
+		DaemonID:               daemonID,
+		DaemonToken:            daemonToken,
+		WorkDir:                filepath.Join(os.TempDir(), "mulwiki-daemon", normalizeProfile(profile)),
+		ReposURL:               reposPath,
+		HealthPort:             daemonHealthPortForProfile(profile),
 	}
 
 	// Ensure daemon dir exists for PID file.
-	os.MkdirAll(daemonDir(), 0o755)
-	os.WriteFile(daemonPIDPath(), []byte(strconv.Itoa(os.Getpid())), 0o644)
-	defer os.Remove(daemonPIDPath())
+	os.MkdirAll(daemonDirForProfile(profile), 0o755)
+	os.WriteFile(daemonPIDPathForProfile(profile), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	defer os.Remove(daemonPIDPathForProfile(profile))
 
 	ctx, stop := signalContext()
 	defer stop()
@@ -315,9 +347,16 @@ func resolveDaemonToken(flagValue, tokenPath string) (string, error) {
 }
 
 func resolveDaemonTokenForStart(flagValue, tokenPath string, cfg CLIConfig, workspaceSlug, daemonID, serverURL string) (string, error) {
+	return resolveDaemonTokenForStartForProfile("", flagValue, tokenPath, cfg, workspaceSlug, daemonID, serverURL)
+}
+
+func resolveDaemonTokenForStartForProfile(profile, flagValue, tokenPath string, cfg CLIConfig, workspaceSlug, daemonID, serverURL string) (string, error) {
 	token, err := resolveDaemonToken(flagValue, tokenPath)
 	if err != nil || token != "" {
 		return token, err
+	}
+	if token := strings.TrimSpace(cfg.DaemonToken); token != "" {
+		return token, nil
 	}
 	if cfg.DaemonTokens != nil {
 		if token := strings.TrimSpace(cfg.DaemonTokens[workspaceSlug]); token != "" {
@@ -328,15 +367,21 @@ func resolveDaemonTokenForStart(flagValue, tokenPath string, cfg CLIConfig, work
 		return "", nil
 	}
 
-	token, err = mintDaemonToken(serverURL, cfg.SessionID, workspaceSlug, daemonID)
+	token, err = mintUserDaemonToken(serverURL, cfg.SessionID, daemonID)
 	if err != nil {
-		return "", err
+		if workspaceSlug == "" {
+			return "", err
+		}
+		token, err = mintDaemonToken(serverURL, cfg.SessionID, workspaceSlug, daemonID)
+		if err != nil {
+			return "", err
+		}
 	}
 	if token == "" {
 		return "", nil
 	}
 
-	latest, err := loadCLIConfig()
+	latest, err := loadCLIConfigForProfile(profile)
 	if err != nil {
 		return "", err
 	}
@@ -346,10 +391,15 @@ func resolveDaemonTokenForStart(flagValue, tokenPath string, cfg CLIConfig, work
 	latest.ServerURL = serverURL
 	latest.WorkspaceSlug = workspaceSlug
 	latest.SessionID = cfg.SessionID
-	latest.DaemonTokens[workspaceSlug] = token
-	if err := saveCLIConfig(latest); err != nil {
+	latest.DaemonToken = token
+	if workspaceSlug != "" {
+		latest.DaemonTokens[workspaceSlug] = token
+	}
+	if err := saveCLIConfigForProfile(profile, latest); err != nil {
 		return "", err
 	}
+	_ = os.MkdirAll(filepath.Dir(tokenPath), 0o755)
+	_ = os.WriteFile(tokenPath, []byte(token+"\n"), 0o600)
 	return token, nil
 }
 
@@ -371,6 +421,34 @@ func mintDaemonToken(serverURL, sessionID, workspaceSlug, daemonID string) (stri
 	return strings.TrimSpace(resp.Token), nil
 }
 
+func mintUserDaemonToken(serverURL, sessionID, daemonID string) (string, error) {
+	client := newAPIClient(serverURL)
+	client.setSessionID(sessionID)
+
+	var resp struct {
+		Token string `json:"token"`
+	}
+	_, err := client.post("/api/daemon-tokens", map[string]string{"daemon_id": daemonID}, &resp)
+	if err != nil {
+		return "", fmt.Errorf("create user daemon token: %w", err)
+	}
+	return strings.TrimSpace(resp.Token), nil
+}
+
+func splitWorkspaceSlugs(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' })
+	out := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" && !seen[part] {
+			seen[part] = true
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // signalContext returns a context that cancels on SIGINT or SIGTERM.
 func signalContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -390,8 +468,9 @@ func signalContext() (context.Context, context.CancelFunc) {
 // daemon stop
 // ---------------------------------------------------------------------------
 
-func runDaemonStop(_ *cobra.Command, _ []string) error {
-	pidData, err := os.ReadFile(daemonPIDPath())
+func runDaemonStop(cmd *cobra.Command, _ []string) error {
+	profile := resolveProfile(cmd)
+	pidData, err := os.ReadFile(daemonPIDPathForProfile(profile))
 	if err != nil {
 		return fmt.Errorf("daemon not running (no PID file)")
 	}
@@ -403,7 +482,7 @@ func runDaemonStop(_ *cobra.Command, _ []string) error {
 
 	process, err := os.FindProcess(pid)
 	if err != nil {
-		os.Remove(daemonPIDPath())
+		os.Remove(daemonPIDPathForProfile(profile))
 		return fmt.Errorf("daemon process not found (pid %d)", pid)
 	}
 
@@ -411,7 +490,7 @@ func runDaemonStop(_ *cobra.Command, _ []string) error {
 		// On Unix, FindProcess always succeeds; the error comes from Signal.
 		// ESRCH means process is already gone.
 		if errors.Is(err, os.ErrProcessDone) {
-			os.Remove(daemonPIDPath())
+			os.Remove(daemonPIDPathForProfile(profile))
 			fmt.Fprintln(os.Stderr, "Daemon was already stopped")
 			return nil
 		}
@@ -422,7 +501,7 @@ func runDaemonStop(_ *cobra.Command, _ []string) error {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := process.Signal(syscall.Signal(0)); err != nil {
-			os.Remove(daemonPIDPath())
+			os.Remove(daemonPIDPathForProfile(profile))
 			fmt.Fprintln(os.Stderr, "Daemon stopped")
 			return nil
 		}
@@ -431,7 +510,7 @@ func runDaemonStop(_ *cobra.Command, _ []string) error {
 
 	fmt.Fprintln(os.Stderr, "Daemon did not stop gracefully, sending SIGKILL")
 	process.Signal(syscall.SIGKILL)
-	os.Remove(daemonPIDPath())
+	os.Remove(daemonPIDPathForProfile(profile))
 	return nil
 }
 
@@ -440,12 +519,13 @@ func runDaemonStop(_ *cobra.Command, _ []string) error {
 // ---------------------------------------------------------------------------
 
 func runDaemonStatus(cmd *cobra.Command, _ []string) error {
+	profile := resolveProfile(cmd)
 	outputFormat, _ := cmd.Flags().GetString("output")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	health := checkDaemonHealth(ctx)
+	health := checkDaemonHealth(ctx, daemonHealthPortForProfile(profile))
 
 	if outputFormat == "json" {
 		enc := json.NewEncoder(os.Stdout)
@@ -460,7 +540,7 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 		fmt.Println("Daemon: not running")
 
 		// Show PID file info if it exists but process is dead.
-		if pidData, err := os.ReadFile(daemonPIDPath()); err == nil {
+		if pidData, err := os.ReadFile(daemonPIDPathForProfile(profile)); err == nil {
 			fmt.Printf("  Stale PID file: %s\n", strings.TrimSpace(string(pidData)))
 		}
 		return nil
@@ -496,18 +576,20 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 // ---------------------------------------------------------------------------
 
 func runDaemonLogs(cmd *cobra.Command, _ []string) error {
+	profile := resolveProfile(cmd)
 	follow, _ := cmd.Flags().GetBool("follow")
 	lines, _ := cmd.Flags().GetInt("lines")
 
-	if _, err := os.Stat(daemonLogPath()); os.IsNotExist(err) {
-		return fmt.Errorf("no daemon log file found at %s", daemonLogPath())
+	logPath := daemonLogPathForProfile(profile)
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		return fmt.Errorf("no daemon log file found at %s", logPath)
 	}
 
 	if follow {
-		return tailFollow(daemonLogPath(), lines)
+		return tailFollow(logPath, lines)
 	}
 
-	return tailLines(daemonLogPath(), lines)
+	return tailLines(logPath, lines)
 }
 
 func tailLines(path string, n int) error {
@@ -558,9 +640,13 @@ func tailFollow(path string, showLast int) error {
 // Health check
 // ---------------------------------------------------------------------------
 
-func checkDaemonHealth(ctx context.Context) map[string]any {
+func checkDaemonHealth(ctx context.Context, port ...int) map[string]any {
+	healthPort := daemonHealthPort
+	if len(port) > 0 && port[0] > 0 {
+		healthPort = port[0]
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("http://localhost:%d/health", daemonHealthPort), nil)
+		fmt.Sprintf("http://localhost:%d/health", healthPort), nil)
 	if err != nil {
 		return map[string]any{"status": "error", "error": err.Error()}
 	}

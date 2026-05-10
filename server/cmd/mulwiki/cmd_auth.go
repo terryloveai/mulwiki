@@ -50,7 +50,8 @@ func init() {
 }
 
 func runLogin(cmd *cobra.Command, _ []string) error {
-	cfg, _ := loadCLIConfig()
+	profile := resolveProfile(cmd)
+	cfg, _ := loadCLIConfigForProfile(profile)
 	serverURL := flagOrEnvConfig(cmd, "server-url", "MULWIKI_SERVER_URL", cfg.ServerURL, "http://localhost:8080")
 	workspace := flagOrEnvConfig(cmd, "workspace", "MULWIKI_WORKSPACE", cfg.WorkspaceSlug, "")
 	email := flagOrEnvConfig(cmd, "email", "MULWIKI_EMAIL", "", "")
@@ -70,13 +71,13 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	user, err := loginWithCredentials(serverURL, email, password, workspace)
+	user, err := loginWithCredentialsForProfile(profile, serverURL, email, password, workspace)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Authenticated as %s\n", user.Email)
 
-	cfg, _ = loadCLIConfig()
+	cfg, _ = loadCLIConfigForProfile(profile)
 	if cfg.WorkspaceSlug != "" {
 		fmt.Fprintf(os.Stderr, "Default workspace: %s\n", cfg.WorkspaceSlug)
 	}
@@ -84,6 +85,10 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 }
 
 func loginWithCredentials(serverURL, email, password, workspace string) (protocol.User, error) {
+	return loginWithCredentialsForProfile("", serverURL, email, password, workspace)
+}
+
+func loginWithCredentialsForProfile(profile, serverURL, email, password, workspace string) (protocol.User, error) {
 	serverURL = strings.TrimRight(strings.TrimSpace(serverURL), "/")
 	if serverURL == "" {
 		serverURL = "http://localhost:8080"
@@ -104,12 +109,13 @@ func loginWithCredentials(serverURL, email, password, workspace string) (protoco
 		return protocol.User{}, errors.New("login response did not include a session cookie")
 	}
 
-	cfg, err := loadCLIConfig()
+	cfg, err := loadCLIConfigForProfile(profile)
 	if err != nil {
 		return protocol.User{}, err
 	}
 	cfg.ServerURL = serverURL
 	cfg.SessionID = sessionID
+	cfg.DaemonToken = ""
 	cfg.DaemonTokens = nil
 	if workspace != "" {
 		cfg.WorkspaceSlug = workspace
@@ -122,7 +128,7 @@ func loginWithCredentials(serverURL, email, password, workspace string) (protoco
 		}
 	}
 
-	if err := saveCLIConfig(cfg); err != nil {
+	if err := saveCLIConfigForProfile(profile, cfg); err != nil {
 		return protocol.User{}, err
 	}
 	return user, nil
@@ -149,7 +155,8 @@ func firstWorkspaceSlug(client *apiClient) (string, error) {
 }
 
 func runAuthStatus(cmd *cobra.Command, _ []string) error {
-	cfg, err := loadCLIConfig()
+	profile := resolveProfile(cmd)
+	cfg, err := loadCLIConfigForProfile(profile)
 	if err != nil {
 		return err
 	}
@@ -172,20 +179,24 @@ func runAuthStatus(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintf(os.Stdout, "Server:    %s\n", serverURL)
 	fmt.Fprintf(os.Stdout, "User:      %s\n", user.Email)
+	if profile != "" && profile != "default" {
+		fmt.Fprintf(os.Stdout, "Profile:   %s\n", profile)
+	}
 	if cfg.WorkspaceSlug != "" {
 		fmt.Fprintf(os.Stdout, "Workspace: %s\n", cfg.WorkspaceSlug)
 	}
 	return nil
 }
 
-func runAuthLogout(_ *cobra.Command, _ []string) error {
-	cfg, _ := loadCLIConfig()
+func runAuthLogout(cmd *cobra.Command, _ []string) error {
+	profile := resolveProfile(cmd)
+	cfg, _ := loadCLIConfigForProfile(profile)
 	if cfg.SessionID != "" && cfg.ServerURL != "" {
 		client := newAPIClient(cfg.ServerURL)
 		client.setSessionID(cfg.SessionID)
 		_, _ = client.post("/api/auth/logout", map[string]any{}, nil)
 	}
-	if err := clearCLIAuth(); err != nil {
+	if err := clearCLIAuthForProfile(profile); err != nil {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "Logged out.")
@@ -193,13 +204,18 @@ func runAuthLogout(_ *cobra.Command, _ []string) error {
 }
 
 func clearCLIAuth() error {
-	cfg, err := loadCLIConfig()
+	return clearCLIAuthForProfile("")
+}
+
+func clearCLIAuthForProfile(profile string) error {
+	cfg, err := loadCLIConfigForProfile(profile)
 	if err != nil {
 		return err
 	}
 	cfg.SessionID = ""
+	cfg.DaemonToken = ""
 	cfg.DaemonTokens = nil
-	return saveCLIConfig(cfg)
+	return saveCLIConfigForProfile(profile, cfg)
 }
 
 func readLine(r io.Reader, prompt string) (string, error) {
