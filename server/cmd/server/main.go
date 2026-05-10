@@ -114,7 +114,7 @@ func main() {
 
 	// CORS
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:5173"},
+		AllowedOrigins:   allowedOrigins(os.Getenv("ALLOWED_ORIGINS")),
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-User-ID", "X-Daemon-ID"},
 		AllowCredentials: true,
@@ -225,6 +225,26 @@ func newHTTPServer(port string, handler http.Handler) *http.Server {
 		ReadTimeout:       serverReadTimeout,
 		IdleTimeout:       serverIdleTimeout,
 	}
+}
+
+func allowedOrigins(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return []string{"http://localhost:3000", "http://localhost:5173"}
+	}
+
+	parts := strings.Split(value, ",")
+	origins := make([]string, 0, len(parts))
+	for _, part := range parts {
+		origin := strings.TrimSpace(part)
+		if origin == "" {
+			continue
+		}
+		origins = append(origins, origin)
+	}
+	if len(origins) == 0 {
+		return []string{"http://localhost:3000", "http://localhost:5173"}
+	}
+	return origins
 }
 
 func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
@@ -484,6 +504,14 @@ func migrateSchemasToGit(db *sql.DB) error {
 			return fmt.Errorf("add workspaces.active_schema_path: %w", err)
 		}
 	}
+	hasConfig, err := hasColumn(db, "schemas", "config")
+	if err != nil {
+		return err
+	}
+	if !hasConfig {
+		slog.Debug("schema-to-git migration skipped; legacy config column is absent")
+		return nil
+	}
 
 	// Check if already migrated
 	var migrated int
@@ -554,17 +582,26 @@ func findReposDir() string {
 }
 
 func ensureColumn(db *sql.DB, table, column, definition string) error {
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
-		return fmt.Errorf("check column %s.%s: %w", table, column, err)
+	exists, err := hasColumn(db, table, column)
+	if err != nil {
+		return err
 	}
-	if count > 0 {
+	if exists {
 		return nil
 	}
 	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
 		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	var count int
+	query := fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?", table)
+	if err := db.QueryRow(query, column).Scan(&count); err != nil {
+		return false, fmt.Errorf("check column %s.%s: %w", table, column, err)
+	}
+	return count > 0, nil
 }
 
 func seedBuiltinSchemas(db *sql.DB, handler *handler.Handler) error {

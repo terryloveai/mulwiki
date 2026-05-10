@@ -1,13 +1,19 @@
 import type { NextConfig } from "next";
 
+const apiBaseUrl = (
+  process.env.MULWIKI_API_URL ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  "http://localhost:8080"
+).replace(/\/$/, "");
+
 const nextConfig: NextConfig = {
   transpilePackages: ["@mulwiki/core", "@mulwiki/ui"],
   async rewrites() {
     return {
       afterFiles: [
-        { source: "/api/:path*", destination: "http://localhost:8080/api/:path*" },
-        { source: "/ws", destination: "http://localhost:8080/ws" },
-        { source: "/uploads/:path*", destination: "http://localhost:8080/uploads/:path*" },
+        { source: "/api/:path*", destination: `${apiBaseUrl}/api/:path*` },
+        { source: "/ws", destination: `${apiBaseUrl}/ws` },
+        { source: "/uploads/:path*", destination: `${apiBaseUrl}/uploads/:path*` },
       ],
     };
   },

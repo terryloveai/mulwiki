@@ -204,3 +204,42 @@ func TestTimeoutHTTPServerConfiguresRuntimeTimeouts(t *testing.T) {
 		t.Fatalf("expected no global WriteTimeout for SSE/WebSocket, got %s", srv.WriteTimeout)
 	}
 }
+
+func TestAllowedOriginsDefaultForLocalDevelopment(t *testing.T) {
+	got := allowedOrigins("")
+	want := []string{"http://localhost:3000", "http://localhost:5173"}
+
+	if len(got) != len(want) {
+		t.Fatalf("expected %d origins, got %#v", len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("origin %d: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestAllowedOriginsParsesCommaSeparatedValues(t *testing.T) {
+	got := allowedOrigins(" https://mulwiki.example.com, http://127.0.0.1:3001 ,,http://localhost:3000 ")
+	want := []string{"https://mulwiki.example.com", "http://127.0.0.1:3001", "http://localhost:3000"}
+
+	if len(got) != len(want) {
+		t.Fatalf("expected %d origins, got %#v", len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("origin %d: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestMigrateSchemasToGitSkipsWhenLegacyConfigColumnIsAbsent(t *testing.T) {
+	db := newMigrationTestDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	if err := migrateSchemasToGit(db); err != nil {
+		t.Fatalf("expected migration to skip clean schema without config column, got %v", err)
+	}
+}
