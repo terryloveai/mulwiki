@@ -32,6 +32,9 @@ mulwiki/
 
 Mulwiki intentionally follows Multica's boundary shape, not its full stack:
 
+- Design durable core business capabilities in this order: Server API, CLI, then Web UI. The server API is the authoritative capability layer; CLI is for automation, scripting, daemon workflows, and advanced users; Web UI is for interaction, visualization, and low-friction access.
+- Before adding a feature, identify the server API that owns it, the CLI command that exposes it for scripts/CI/agents, and the Web UI that calls the same API. Do not create Web-only business capabilities unless the behavior is purely presentational.
+- CLI commands for durable capabilities should be non-interactive by default, support `--output json` where automation needs it, and return non-zero on failures.
 - Keep chi route groups as the backend composition boundary. Public auth and health routes are explicit; workspace routes must run through Auth, Workspace, then Role middleware.
 - Treat `workspace_members` as the tenant boundary. A request is workspace-scoped only after membership has been resolved into context.
 - Keep handlers thin. Handlers decode HTTP, call service/store code, publish events, and serialize responses.

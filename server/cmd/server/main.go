@@ -300,6 +300,7 @@ func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
 			// Wiki (git-backed — markdown with frontmatter)
 			r.Route("/wiki", func(r chi.Router) {
 				r.Get("/", h.ListWikiPages)
+				r.Get("/export", h.ExportWiki)
 				r.Get("/search", h.SearchWikiPages)
 				r.Post("/", h.CreateWikiPage)
 				r.Get("/*", h.GetWikiPage)
@@ -312,6 +313,8 @@ func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
 				r.Post("/", h.CreateJob)
 				r.Get("/{id}", h.GetJob)
 				r.Get("/{id}/logs", h.StreamJobLogs)
+				r.With(middleware.RequireAdmin()).Post("/{id}/cancel", h.CancelJob)
+				r.With(middleware.RequireAdmin()).Post("/{id}/retry", h.RetryJob)
 			})
 
 			// Agents

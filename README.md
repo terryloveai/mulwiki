@@ -23,6 +23,18 @@ Ingest Job = Sources + Schema + Agent -> Wiki
 
 Unlike a RAG chat tool, the main output is not a temporary answer. The output is a versionable wiki that can be inspected, edited, searched, and incrementally updated.
 
+## Capability Model
+
+Core business capabilities should be designed in this order:
+
+```text
+Server API = authoritative capability layer
+CLI        = automation, scripting, daemon, and advanced-user layer
+Web UI     = interaction, visualization, and low-friction entry point
+```
+
+For durable product behavior, Mulwiki should expose the capability through the server API first, then make it scriptable through the CLI, then present it in the Web UI by calling the same API. CLI commands intended for automation should support `--output json` where practical.
+
 ## Current Capabilities
 
 - Authenticated users and workspace membership with owner/admin/member roles.
@@ -32,6 +44,7 @@ Unlike a RAG chat tool, the main output is not a temporary answer. The output is
 - Local daemon registration for available agent CLIs such as Codex, Claude Code, Kimi, or custom runtimes.
 - Agent configuration for runtime binding, instructions, skills, environment variables, custom args, model settings, and task history.
 - Persistent jobs, agent tasks, runtime state, session pointers, logs, and agent messages.
+- CLI parity for core workspace, schema, source, runtime, agent, skill, job, and wiki workflows.
 - Realtime UI updates through WebSocket events.
 
 ## Quick Start

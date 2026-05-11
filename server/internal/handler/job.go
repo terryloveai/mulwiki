@@ -221,6 +221,45 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, j)
 }
 
+// POST /api/workspaces/{slug}/jobs/{id}/cancel — cancel a job.
+func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
+	id := idParam(r, "id")
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	if err := service.NewJobServiceWithBus(h.DB, h.EventBus).CancelJob(workspaceID, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found or already terminal")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to cancel job")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+// POST /api/workspaces/{slug}/jobs/{id}/retry — create a retry job.
+func (h *Handler) RetryJob(w http.ResponseWriter, r *http.Request) {
+	id := idParam(r, "id")
+	workspaceID, err := h.workspaceIDForRequest(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	job, err := service.NewJobServiceWithBus(h.DB, h.EventBus).RetryJob(workspaceID, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to retry job")
+		return
+	}
+	writeJSON(w, http.StatusCreated, job)
+}
+
 // POST /api/workspaces/{slug}/jobs/{id}/log-line — daemon pushes a log line
 func (h *Handler) AppendJobLog(w http.ResponseWriter, r *http.Request) {
 	id := idParam(r, "id")

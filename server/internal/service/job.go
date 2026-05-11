@@ -173,6 +173,32 @@ func (s *JobService) FailJob(workspaceID, jobID string, errMsg string) error {
 	return rowsAffectedOrNotFound(result, err)
 }
 
+// CancelJob marks a job as cancelled.
+func (s *JobService) CancelJob(workspaceID, jobID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := s.DB.Exec(
+		`UPDATE jobs SET status = 'cancelled', completed_at = ?
+		 WHERE id = ? AND workspace_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')`,
+		now, jobID, workspaceID,
+	)
+	return rowsAffectedOrNotFound(result, err)
+}
+
+// RetryJob creates a fresh pending job with the same agent, schema, and sources.
+func (s *JobService) RetryJob(workspaceID, jobID string) (*protocol.Job, error) {
+	original, err := s.GetWorkspaceJob(workspaceID, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return s.CreateJob(CreateJobInput{
+		WorkspaceID: workspaceID,
+		AgentID:     original.AgentID,
+		SourcePath:  original.SourcePath,
+		SourcePaths: original.SourcePaths,
+		SchemaID:    original.SchemaID,
+	})
+}
+
 // UpdateJobProgress updates the progress of a running job.
 func (s *JobService) UpdateJobProgress(workspaceID, jobID string, progress int) error {
 	result, err := s.DB.Exec(
