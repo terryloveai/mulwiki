@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"fmt"
@@ -264,6 +265,42 @@ func (h *Handler) SearchWikiPages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, results)
+}
+
+// GET /api/workspaces/{slug}/wiki/export — export wiki markdown as a zip.
+func (h *Handler) ExportWiki(w http.ResponseWriter, r *http.Request) {
+	repo, err := h.openRepo(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace repo not found")
+		return
+	}
+	files, err := repo.ListFiles("wiki/")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list wiki files")
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="wiki.zip"`)
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+	for _, file := range files {
+		if !strings.HasSuffix(file, ".md") {
+			continue
+		}
+		content, err := repo.ShowFile(file)
+		if err != nil {
+			continue
+		}
+		entry, err := zw.Create(strings.TrimPrefix(file, "wiki/"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create zip entry")
+			return
+		}
+		if _, err := entry.Write(content); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to write zip entry")
+			return
+		}
+	}
 }
 
 // ── frontmatter parser ──

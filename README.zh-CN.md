@@ -23,6 +23,18 @@ Ingest Job = Sources + Schema + Agent -> Wiki
 
 它和 RAG 聊天工具的主要区别是：输出不是临时答案，而是可以检查、编辑、搜索、版本化并持续增量更新的 wiki。
 
+## 能力分层
+
+核心业务能力应该按这个顺序设计：
+
+```text
+Server API = 权威能力层
+CLI        = 自动化、脚本、daemon 和高级用户入口
+Web UI     = 人机交互、可视化和低门槛入口
+```
+
+对于持久化的产品行为，Mulwiki 应该先通过 server API 暴露能力，再通过 CLI 让它可脚本化，最后由 Web UI 调用同一套 API 呈现出来。面向自动化的 CLI 命令应尽量支持 `--output json`。
+
 ## 当前能力
 
 - 用户登录注册，以及 workspace 成员权限，支持 owner/admin/member 角色。
@@ -32,6 +44,7 @@ Ingest Job = Sources + Schema + Agent -> Wiki
 - 本地 daemon 自动发现 Codex、Claude Code、Kimi 或自定义 Agent CLI，并向 server 注册 runtime。
 - Agent 支持配置 runtime 绑定、instructions、skills、环境变量、自定义参数、模型设置和任务历史。
 - 持久化 jobs、agent tasks、runtime 状态、session 指针、日志和 agent messages。
+- CLI 已覆盖核心 workspace、schema、source、runtime、agent、skill、job 和 wiki 工作流。
 - WebSocket 事件驱动的实时 UI 更新。
 
 ## 快速开始

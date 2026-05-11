@@ -9,6 +9,7 @@ This directory keeps long-form product, architecture, design, and implementation
 
 ## Architecture And Reference
 
+- [CLI Parity Plan](architecture/cli-parity-plan.md)
 - [Multica Alignment](architecture/multica-alignment.md)
 - [Multica Deep Dive](architecture/multica-deep-dive.md)
 - [Multica Source Code Deep Dive](architecture/multica-sourcecode-deep-dive.md)

@@ -1,12 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"time"
+	"net/url"
+	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
 var runtimeCmd = &cobra.Command{
@@ -16,109 +18,231 @@ var runtimeCmd = &cobra.Command{
 
 var runtimeListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List runtimes registered by daemons in the workspace",
+	Short: "List runtimes",
 	RunE:  runRuntimeList,
 }
 
+var runtimeGetCmd = &cobra.Command{
+	Use:   "get <id-or-name>",
+	Short: "Show a runtime",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runRuntimeGet,
+}
+
+var runtimeCreateCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a manual runtime",
+	RunE:  runRuntimeCreate,
+}
+
+var runtimeUpdateCmd = &cobra.Command{
+	Use:   "update <id-or-name>",
+	Short: "Update a runtime",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runRuntimeUpdate,
+}
+
+var runtimeDeleteCmd = &cobra.Command{
+	Use:   "delete <id-or-name>",
+	Short: "Delete a runtime",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runRuntimeDelete,
+}
+
 func init() {
-	runtimeListCmd.Flags().String("server-url", "", "Mulwiki server URL (env: MULWIKI_SERVER_URL)")
-	runtimeListCmd.Flags().String("workspace", "", "Workspace slug (env: MULWIKI_WORKSPACE)")
-	runtimeListCmd.Flags().String("output", "table", "Output format: table or json")
+	addWorkspaceFlag(runtimeListCmd)
+	addOutputFlag(runtimeListCmd, outputTable)
+	addWorkspaceFlag(runtimeGetCmd)
+	addOutputFlag(runtimeGetCmd, outputJSON)
+	addRuntimeCreateFlags(runtimeCreateCmd)
+	addRuntimeUpdateFlags(runtimeUpdateCmd)
+	addWorkspaceFlag(runtimeDeleteCmd)
+	runtimeDeleteCmd.Flags().Bool("yes", false, "Confirm deletion")
 
 	runtimeCmd.AddCommand(runtimeListCmd)
+	runtimeCmd.AddCommand(runtimeGetCmd)
+	runtimeCmd.AddCommand(runtimeCreateCmd)
+	runtimeCmd.AddCommand(runtimeUpdateCmd)
+	runtimeCmd.AddCommand(runtimeDeleteCmd)
 	rootCmd.AddCommand(runtimeCmd)
 }
 
+func addRuntimeCreateFlags(cmd *cobra.Command) {
+	addWorkspaceFlag(cmd)
+	cmd.Flags().String("name", "", "Runtime name")
+	cmd.Flags().String("backend", "", "Runtime backend")
+	cmd.Flags().String("path", "", "CLI executable path")
+	cmd.Flags().String("hostname", "", "Hostname")
+	cmd.Flags().String("os", runtime.GOOS, "Operating system")
+	cmd.Flags().String("version", "", "Runtime version")
+	addOutputFlag(cmd, outputJSON)
+}
+
+func addRuntimeUpdateFlags(cmd *cobra.Command) {
+	addWorkspaceFlag(cmd)
+	cmd.Flags().String("name", "", "Runtime name")
+	cmd.Flags().String("backend", "", "Runtime backend")
+	cmd.Flags().String("path", "", "CLI executable path")
+	cmd.Flags().String("hostname", "", "Hostname")
+	cmd.Flags().String("os", "", "Operating system")
+	cmd.Flags().String("version", "", "Runtime version")
+	addOutputFlag(cmd, outputJSON)
+}
+
 func runRuntimeList(cmd *cobra.Command, _ []string) error {
-	cfg, _ := loadCLIConfig()
-	serverURL := flagOrEnvConfig(cmd, "server-url", "MULWIKI_SERVER_URL", cfg.ServerURL, "http://localhost:8080")
-	workspace := flagOrEnvConfig(cmd, "workspace", "MULWIKI_WORKSPACE", cfg.WorkspaceSlug, "")
-	outputFormat, _ := cmd.Flags().GetString("output")
-
-	if workspace == "" {
-		return fmt.Errorf("workspace is required (--workspace, MULWIKI_WORKSPACE, or login config)")
+	_, client, workspace, err := workspaceClient(cmd)
+	if err != nil {
+		return err
 	}
-
-	client := newAPIClient(serverURL)
-	client.setSessionID(cfg.SessionID)
-
-	type runtimeItem struct {
-		ID            string `json:"id"`
-		Name          string `json:"name"`
-		Backend       string `json:"backend"`
-		Version       string `json:"version"`
-		Hostname      string `json:"hostname"`
-		Status        string `json:"status"`
-		DaemonID      string `json:"daemon_id"`
-		LastHeartbeat string `json:"last_heartbeat"`
-		Path          string `json:"path"`
+	runtimes, err := listRuntimes(client, workspace)
+	if err != nil {
+		return err
 	}
-
-	var resp struct {
-		Runtimes []runtimeItem `json:"runtimes"`
+	format, err := outputFormat(cmd)
+	if err != nil {
+		return err
 	}
-	if err := client.get(fmt.Sprintf("/api/workspaces/%s/agents/runtimes", workspace), &resp); err != nil {
-		return fmt.Errorf("list runtimes: %w", err)
+	if format == outputJSON {
+		return printJSON(cmd.OutOrStdout(), runtimes)
 	}
-
-	runtimes := resp.Runtimes
-
-	if outputFormat == "json" {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(runtimes)
-	}
-
-	if len(runtimes) == 0 {
-		fmt.Println("No runtimes registered. Start a daemon to auto-register runtimes.")
-		return nil
-	}
-
-	// Table output.
-	fmt.Printf("%-20s %-14s %-26s %-12s %s\n", "NAME", "BACKEND", "DAEMON", "STATUS", "VERSION")
+	rows := make([][]string, 0, len(runtimes))
 	for _, rt := range runtimes {
-		shortDaemon := rt.DaemonID
-		if len(shortDaemon) > 12 {
-			shortDaemon = shortDaemon[:12]
-		}
-		status := rt.Status
-		lastBeat, err := time.Parse(time.RFC3339, rt.LastHeartbeat)
-		if err == nil && status == "online" {
-			ago := time.Since(lastBeat).Truncate(time.Second)
-			if ago > 5*time.Minute {
-				status = "stale"
-			}
-		}
-		statusIcon := map[string]string{
-			"online": "●", "offline": "○", "stale": "◐",
-		}[status]
-		if statusIcon == "" {
-			statusIcon = "?"
-		}
-		fmt.Printf("%-20s %-14s %-26s %s %-7s %s\n",
-			truncate(rt.Name, 20), rt.Backend, shortDaemon, statusIcon, status, rt.Version)
+		rows = append(rows, []string{rt.ID, rt.Name, rt.Backend, rt.Status, rt.Version, rt.DaemonID})
 	}
-	fmt.Printf("\n%d runtime(s)\n", len(runtimes))
+	printTable(cmd.OutOrStdout(), []string{"ID", "NAME", "BACKEND", "STATUS", "VERSION", "DAEMON"}, rows)
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+func runRuntimeGet(cmd *cobra.Command, args []string) error {
+	_, client, workspace, err := workspaceClient(cmd)
+	if err != nil {
+		return err
+	}
+	rt, err := resolveRuntime(client, workspace, args[0])
+	if err != nil {
+		return err
+	}
+	return writeRuntimeOutput(cmd, rt)
+}
 
-func flagOrEnv(cmd *cobra.Command, flagName, envKey, defaultVal string) string {
-	if v, _ := cmd.Flags().GetString(flagName); v != "" {
-		return v
+func runRuntimeCreate(cmd *cobra.Command, _ []string) error {
+	_, client, workspace, err := workspaceClient(cmd)
+	if err != nil {
+		return err
 	}
-	if v := os.Getenv(envKey); v != "" {
-		return v
+	name, _ := cmd.Flags().GetString("name")
+	backend, _ := cmd.Flags().GetString("backend")
+	path, _ := cmd.Flags().GetString("path")
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("--name is required")
 	}
-	return defaultVal
+	req := protocol.CreateRuntimeRequest{Name: name, Backend: backend, Path: path}
+	req.Hostname, _ = cmd.Flags().GetString("hostname")
+	req.OS, _ = cmd.Flags().GetString("os")
+	req.Version, _ = cmd.Flags().GetString("version")
+	var resp struct {
+		Runtime protocol.AgentRuntime `json:"runtime"`
+	}
+	if _, err := client.post(runtimeBasePath(workspace), req, &resp); err != nil {
+		return fmt.Errorf("create runtime: %w", err)
+	}
+	return writeRuntimeOutput(cmd, resp.Runtime)
+}
+
+func runRuntimeUpdate(cmd *cobra.Command, args []string) error {
+	_, client, workspace, err := workspaceClient(cmd)
+	if err != nil {
+		return err
+	}
+	rt, err := resolveRuntime(client, workspace, args[0])
+	if err != nil {
+		return err
+	}
+	req := protocol.UpdateRuntimeRequest{}
+	if flagChanged(cmd, "name") {
+		value, _ := cmd.Flags().GetString("name")
+		req.Name = &value
+	}
+	if flagChanged(cmd, "backend") {
+		value, _ := cmd.Flags().GetString("backend")
+		req.Backend = &value
+	}
+	if flagChanged(cmd, "path") {
+		value, _ := cmd.Flags().GetString("path")
+		req.Path = &value
+	}
+	if flagChanged(cmd, "hostname") {
+		value, _ := cmd.Flags().GetString("hostname")
+		req.Hostname = &value
+	}
+	if flagChanged(cmd, "os") {
+		value, _ := cmd.Flags().GetString("os")
+		req.OS = &value
+	}
+	if flagChanged(cmd, "version") {
+		value, _ := cmd.Flags().GetString("version")
+		req.Version = &value
+	}
+	var resp struct {
+		Runtime protocol.AgentRuntime `json:"runtime"`
+	}
+	if _, err := client.patch(runtimeItemPath(workspace, rt.ID), req, &resp); err != nil {
+		return fmt.Errorf("update runtime: %w", err)
+	}
+	return writeRuntimeOutput(cmd, resp.Runtime)
+}
+
+func runRuntimeDelete(cmd *cobra.Command, args []string) error {
+	yes, _ := cmd.Flags().GetBool("yes")
+	if !yes {
+		return fmt.Errorf("refusing to delete runtime without --yes")
+	}
+	_, client, workspace, err := workspaceClient(cmd)
+	if err != nil {
+		return err
+	}
+	rt, err := resolveRuntime(client, workspace, args[0])
+	if err != nil {
+		return err
+	}
+	if _, err := client.delete(runtimeItemPath(workspace, rt.ID)); err != nil {
+		return fmt.Errorf("delete runtime: %w", err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Deleted runtime %s\n", rt.ID)
+	return nil
+}
+
+func listRuntimes(client *apiClient, workspace string) ([]protocol.AgentRuntime, error) {
+	var resp struct {
+		Runtimes []protocol.AgentRuntime `json:"runtimes"`
+	}
+	if err := client.get(runtimeBasePath(workspace), &resp); err != nil {
+		return nil, fmt.Errorf("list runtimes: %w", err)
+	}
+	return resp.Runtimes, nil
+}
+
+func runtimeItemPath(workspace, id string) string {
+	return runtimeBasePath(workspace) + "/" + url.PathEscape(id)
+}
+
+func writeRuntimeOutput(cmd *cobra.Command, rt protocol.AgentRuntime) error {
+	format, err := outputFormat(cmd)
+	if err != nil {
+		return err
+	}
+	if format == outputJSON {
+		return printJSON(cmd.OutOrStdout(), rt)
+	}
+	printTable(cmd.OutOrStdout(), []string{"ID", "NAME", "BACKEND", "STATUS", "VERSION", "DAEMON"}, [][]string{
+		{rt.ID, rt.Name, rt.Backend, rt.Status, rt.Version, rt.DaemonID},
+	})
+	return nil
 }
 
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen-1] + "…"
+	return s[:maxLen-1] + "..."
 }

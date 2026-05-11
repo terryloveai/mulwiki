@@ -50,7 +50,39 @@ func (c *apiClient) get(path string, target any) error {
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
+func (c *apiClient) getRaw(path string) ([]byte, error) {
+	req, err := c.newRequest(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
 func (c *apiClient) post(path string, payload any, target any) (*http.Response, error) {
+	return c.doJSON(http.MethodPost, path, payload, target)
+}
+
+func (c *apiClient) put(path string, payload any, target any) (*http.Response, error) {
+	return c.doJSON(http.MethodPut, path, payload, target)
+}
+
+func (c *apiClient) patch(path string, payload any, target any) (*http.Response, error) {
+	return c.doJSON(http.MethodPatch, path, payload, target)
+}
+
+func (c *apiClient) delete(path string) (*http.Response, error) {
+	return c.doJSON(http.MethodDelete, path, nil, nil)
+}
+
+func (c *apiClient) doJSON(method, path string, payload any, target any) (*http.Response, error) {
 	var body io.Reader
 	if payload != nil {
 		data, err := json.Marshal(payload)
@@ -60,7 +92,7 @@ func (c *apiClient) post(path string, payload any, target any) (*http.Response, 
 		body = bytes.NewReader(data)
 	}
 
-	req, err := c.newRequest(http.MethodPost, path, body)
+	req, err := c.newRequest(method, path, body)
 	if err != nil {
 		return nil, err
 	}
