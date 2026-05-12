@@ -171,6 +171,51 @@ func TestRunMigrationsDoesNotBackfillWhenMembershipsAlreadyExist(t *testing.T) {
 	}
 }
 
+func TestRunMigrationsAddsAgentTaskJobIDBeforeSchemaIndexes(t *testing.T) {
+	db := newMigrationTestDB(t)
+	if _, err := db.Exec(`
+		CREATE TABLE agent_tasks (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			runtime_id TEXT,
+			source_path TEXT NOT NULL DEFAULT '',
+			schema_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			priority INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		INSERT INTO agent_tasks (id, workspace_id, agent_id)
+		VALUES ('task-1', 'ws-1', 'agent-1');
+	`); err != nil {
+		t.Fatalf("create legacy agent_tasks: %v", err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	hasJobID, err := hasColumn(db, "agent_tasks", "job_id")
+	if err != nil {
+		t.Fatalf("check job_id: %v", err)
+	}
+	if !hasJobID {
+		t.Fatalf("expected agent_tasks.job_id to be added")
+	}
+
+	var indexedColumn string
+	if err := db.QueryRow(`
+		SELECT ii.name
+		FROM pragma_index_info('idx_agent_tasks_job') ii
+		LIMIT 1
+	`).Scan(&indexedColumn); err != nil {
+		t.Fatalf("query idx_agent_tasks_job: %v", err)
+	}
+	if indexedColumn != "job_id" {
+		t.Fatalf("index column = %q, want job_id", indexedColumn)
+	}
+}
+
 func TestMountWorkspaceRoutesDoesNotDuplicateSlugRoute(t *testing.T) {
 	db := newMigrationTestDB(t)
 	h := &handler.Handler{DB: db}

@@ -348,7 +348,34 @@ func resolveDaemonTokenForStart(flagValue, tokenPath string, cfg CLIConfig, work
 }
 
 func resolveDaemonTokenForStartForProfile(profile, flagValue, tokenPath string, cfg CLIConfig, workspaceSlug, daemonID, serverURL string) (string, error) {
-	token, err := resolveDaemonToken(flagValue, tokenPath)
+	if token := strings.TrimSpace(flagValue); token != "" {
+		return token, nil
+	}
+	if token := strings.TrimSpace(os.Getenv("MULWIKI_DAEMON_TOKEN")); token != "" {
+		return token, nil
+	}
+
+	if cfg.SessionID != "" {
+		token, err := mintUserDaemonToken(serverURL, cfg.SessionID, daemonID)
+		if err != nil {
+			if workspaceSlug == "" {
+				return "", err
+			}
+			token, err = mintDaemonToken(serverURL, cfg.SessionID, workspaceSlug, daemonID)
+			if err != nil {
+				return "", err
+			}
+		}
+		if token != "" {
+			cacheWorkspaceSlug := workspaceSlug
+			if cacheWorkspaceSlug == "" {
+				cacheWorkspaceSlug = cfg.WorkspaceSlug
+			}
+			return token, cacheDaemonTokenForProfile(profile, tokenPath, serverURL, cacheWorkspaceSlug, cfg.SessionID, token)
+		}
+	}
+
+	token, err := resolveDaemonToken("", tokenPath)
 	if err != nil || token != "" {
 		return token, err
 	}
@@ -360,44 +387,30 @@ func resolveDaemonTokenForStartForProfile(profile, flagValue, tokenPath string, 
 			return token, nil
 		}
 	}
-	if cfg.SessionID == "" {
-		return "", nil
-	}
+	return "", nil
+}
 
-	token, err = mintUserDaemonToken(serverURL, cfg.SessionID, daemonID)
-	if err != nil {
-		if workspaceSlug == "" {
-			return "", err
-		}
-		token, err = mintDaemonToken(serverURL, cfg.SessionID, workspaceSlug, daemonID)
-		if err != nil {
-			return "", err
-		}
-	}
-	if token == "" {
-		return "", nil
-	}
-
+func cacheDaemonTokenForProfile(profile, tokenPath string, serverURL, workspaceSlug, sessionID, token string) error {
 	latest, err := loadCLIConfigForProfile(profile)
 	if err != nil {
-		return "", err
+		return err
 	}
-	if latest.DaemonTokens == nil {
-		latest.DaemonTokens = map[string]string{}
-	}
+	latest.DaemonTokens = map[string]string{}
 	latest.ServerURL = serverURL
-	latest.WorkspaceSlug = workspaceSlug
-	latest.SessionID = cfg.SessionID
+	if workspaceSlug != "" {
+		latest.WorkspaceSlug = workspaceSlug
+	}
+	latest.SessionID = sessionID
 	latest.DaemonToken = token
 	if workspaceSlug != "" {
 		latest.DaemonTokens[workspaceSlug] = token
 	}
 	if err := saveCLIConfigForProfile(profile, latest); err != nil {
-		return "", err
+		return err
 	}
 	_ = os.MkdirAll(filepath.Dir(tokenPath), 0o755)
 	_ = os.WriteFile(tokenPath, []byte(token+"\n"), 0o600)
-	return token, nil
+	return nil
 }
 
 func mintDaemonToken(serverURL, sessionID, workspaceSlug, daemonID string) (string, error) {
@@ -523,23 +536,41 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 	defer cancel()
 
 	health := checkDaemonHealth(ctx, daemonHealthPortForProfile(profile))
+	cfg, _ := loadCLIConfigForProfile(profile)
+	serverStatus := doctorCheck{Status: "skipped", Detail: "auth or workspace missing"}
+	if cfg.SessionID != "" && cfg.WorkspaceSlug != "" {
+		serverURL := strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
+		if serverURL == "" {
+			serverURL = "http://localhost:8080"
+		}
+		client := newAPIClient(serverURL)
+		client.setSessionID(cfg.SessionID)
+		serverStatus = checkServerRegistration(client, cfg.WorkspaceSlug)
+	}
 
 	if outputFormat == "json" {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(health)
-		return nil
+		return enc.Encode(map[string]any{
+			"local":               health,
+			"server_registration": serverStatus,
+		})
 	}
 
 	// Table format.
 	status, _ := health["status"].(string)
 	if status != "running" {
-		fmt.Println("Daemon: not running")
+		fmt.Fprintln(cmd.OutOrStdout(), "Daemon: not running")
 
 		// Show PID file info if it exists but process is dead.
 		if pidData, err := os.ReadFile(daemonPIDPathForProfile(profile)); err == nil {
-			fmt.Printf("  Stale PID file: %s\n", strings.TrimSpace(string(pidData)))
+			fmt.Fprintf(cmd.OutOrStdout(), "  Stale PID file: %s\n", strings.TrimSpace(string(pidData)))
 		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Server registration: %s", serverStatus.Status)
+		if serverStatus.Detail != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), " (%s)", serverStatus.Detail)
+		}
+		fmt.Fprintln(cmd.OutOrStdout())
 		return nil
 	}
 
@@ -549,21 +580,26 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 	workspaces, _ := health["workspaces"].([]any)
 	runtimes, _ := health["runtimes"].([]any)
 
-	fmt.Printf("Daemon: running\n")
-	fmt.Printf("  PID:      %.0f\n", pid)
-	fmt.Printf("  Version:  %s\n", version)
-	fmt.Printf("  Uptime:   %s\n", uptime)
+	fmt.Fprintf(cmd.OutOrStdout(), "Daemon: running\n")
+	fmt.Fprintf(cmd.OutOrStdout(), "  PID:      %.0f\n", pid)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Version:  %s\n", version)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Uptime:   %s\n", uptime)
 	if len(workspaces) > 0 {
-		fmt.Printf("  Workspaces: %v\n", workspaces)
+		fmt.Fprintf(cmd.OutOrStdout(), "  Workspaces: %v\n", workspaces)
 	}
 	if len(runtimes) > 0 {
-		fmt.Println("  Runtimes:")
+		fmt.Fprintln(cmd.OutOrStdout(), "  Runtimes:")
 		for _, r := range runtimes {
 			if rm, ok := r.(map[string]any); ok {
-				fmt.Printf("    %s (%s) — %s\n", rm["name"], rm["backend"], rm["status"])
+				fmt.Fprintf(cmd.OutOrStdout(), "    %s (%s) — %s\n", rm["name"], rm["backend"], rm["status"])
 			}
 		}
 	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Server registration: %s", serverStatus.Status)
+	if serverStatus.Detail != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), " (%s)", serverStatus.Detail)
+	}
+	fmt.Fprintln(cmd.OutOrStdout())
 
 	return nil
 }

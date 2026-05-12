@@ -64,6 +64,55 @@ function multiWorkspaceDaemonCommand(): string {
   return "mulwiki --profile dev daemon start";
 }
 
+function daemonIsFresh(daemon: DaemonRegistration, now: number): boolean {
+  return new Date(daemon.last_heartbeat).getTime() > now - 5 * 60 * 1000;
+}
+
+function daemonProblemSummary(
+  daemons: DaemonRegistration[],
+  runtimes: AgentRuntime[],
+  workspaceSlug: string,
+  now: number
+): { title: string; detail: string; action: string } {
+  const freshDaemons = daemons.filter((d) => daemonIsFresh(d, now) && d.pid > 0);
+  const staleDaemons = daemons.filter((d) => !daemonIsFresh(d, now) || d.pid <= 0);
+  const orphaned = runtimes.filter((r) => !r.daemon_id || !daemons.some((d) => d.id === r.daemon_id));
+
+  if (freshDaemons.length > 0) {
+    return {
+      title: "Daemon registration is healthy",
+      detail: `${freshDaemons.length} daemon registration${freshDaemons.length !== 1 ? "s are" : " is"} live for ${workspaceSlug}.`,
+      action: "",
+    };
+  }
+  if (daemons.length === 0 && runtimes.length === 0) {
+    return {
+      title: "No daemon registered",
+      detail: `The server has no daemon registration or runtimes for ${workspaceSlug}.`,
+      action: `Run ${multiWorkspaceDaemonCommand()} to auto-discover your workspaces, or ${daemonStartCommand(workspaceSlug)} for only this workspace.`,
+    };
+  }
+  if (staleDaemons.length > 0) {
+    return {
+      title: "Daemon heartbeat is stale",
+      detail: `${staleDaemons.length} daemon registration${staleDaemons.length !== 1 ? "s have" : " has"} stopped heartbeating. The local process may be stopped, unreachable, or using an invalid daemon token.`,
+      action: "Run mulwiki doctor, then mulwiki auth refresh and restart the daemon if the token check fails.",
+    };
+  }
+  if (orphaned.length > 0) {
+    return {
+      title: "Runtimes are orphaned",
+      detail: `${orphaned.length} runtime${orphaned.length !== 1 ? "s reference" : " references"} a daemon that is no longer registered for this workspace.`,
+      action: "Restart the CLI daemon so it can re-register runtimes for the current workspace set.",
+    };
+  }
+  return {
+    title: "No live daemon registration",
+    detail: "The web app can reach the server, but the server does not have a live daemon for this workspace.",
+    action: "Run mulwiki doctor to separate local process, auth token, and server registration issues.",
+  };
+}
+
 /* ── page ── */
 
 export default function RuntimesPage({
@@ -167,20 +216,18 @@ export default function RuntimesPage({
 
       {/* ── Daemon Grouped Cards ── */}
       {(() => {
-        const hasLiveDaemon = Array.from(daemonMap.keys()).some((key) => {
-          if (key === "__orphaned__") return false;
-          const d = daemons.find((dd) => dd.id === key);
-          return d && new Date(d.last_heartbeat).getTime() > now - 5 * 60 * 1000 && d.pid > 0;
-        });
+        const hasLiveDaemon = daemons.some((d) => daemonIsFresh(d, now) && d.pid > 0);
+        const daemonProblem = daemonProblemSummary(daemons, runtimes, workspaceSlug, now);
 
         if (!hasLiveDaemon && runtimes.length === 0) {
           return (
             <div className="flex h-64 flex-col items-center justify-center gap-3 text-muted-foreground">
               <Cpu className="h-12 w-12 opacity-30" />
-              <p className="text-lg font-medium">No runtimes registered</p>
+              <p className="text-lg font-medium">{daemonProblem.title}</p>
               <p className="max-w-xl text-center text-sm">
-                Run <code className="rounded bg-muted px-1 py-0.5 text-xs">{daemonStartCommand(workspaceSlug)}</code> for this workspace, or <code className="rounded bg-muted px-1 py-0.5 text-xs">{multiWorkspaceDaemonCommand()}</code> to let a profile daemon discover all of your workspaces.
+                {daemonProblem.detail}
               </p>
+              <p className="max-w-xl text-center text-xs">{daemonProblem.action}</p>
             </div>
           );
         }
@@ -189,13 +236,15 @@ export default function RuntimesPage({
           return (
             <div className="mb-4 flex flex-col items-center gap-3 rounded-lg border bg-card p-8 text-muted-foreground">
               <Server className="h-8 w-8 opacity-30" />
-              <p className="text-sm font-medium">No daemon running</p>
+              <p className="text-sm font-medium">{daemonProblem.title}</p>
               <p className="max-w-xl text-center text-xs">
-                Start a CLI daemon for this workspace, or run a profile daemon without <code className="rounded bg-muted px-1 py-0.5 text-[11px]">--workspace</code> to auto-discover every workspace your user can access.
+                {daemonProblem.detail}
               </p>
+              <p className="max-w-xl text-center text-xs">{daemonProblem.action}</p>
               <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
                 <code className="rounded bg-muted px-2 py-1">{daemonStartCommand(workspaceSlug)}</code>
                 <code className="rounded bg-muted px-2 py-1">{multiWorkspaceDaemonCommand()}</code>
+                <code className="rounded bg-muted px-2 py-1">mulwiki doctor</code>
               </div>
               <Button
                 size="sm"
@@ -216,14 +265,14 @@ export default function RuntimesPage({
       {(Array.from(daemonMap.keys()).some((key) => {
         if (key === "__orphaned__") return daemonMap.get("__orphaned__")!.runtimes.length > 0;
         const d = daemons.find((dd) => dd.id === key);
-        return d && new Date(d.last_heartbeat).getTime() > now - 5 * 60 * 1000 && d.pid > 0;
+        return d && daemonIsFresh(d, now) && d.pid > 0;
       })) && (
         <div className="space-y-3">
           {Array.from(daemonMap.entries())
             .filter(([daemonID]) => {
               if (daemonID === "__orphaned__") return true;
               const d = daemons.find((dd) => dd.id === daemonID);
-              return d && new Date(d.last_heartbeat).getTime() > now - 5 * 60 * 1000 && d.pid > 0;
+              return d && daemonIsFresh(d, now) && d.pid > 0;
             })
             .map(([daemonID, { runtimes: rts, online }]) => {
             const daemon = daemons.find((d) => d.id === daemonID);
