@@ -49,6 +49,11 @@ type Daemon struct {
 	startTime    time.Time
 	detected     []protocol.RuntimeInfo // auto-detected runtimes
 	workspacesMu sync.RWMutex
+
+	registrationMu     sync.RWMutex
+	registrationStatus string
+	registrationError  string
+	lastRegisteredAt   time.Time
 }
 
 // Config holds daemon configuration.
@@ -202,6 +207,12 @@ func (d *Daemon) serveHealth(ctx context.Context) {
 			"uptime":     time.Since(d.startTime).Truncate(time.Second).String(),
 			"workspaces": d.currentWorkspaceSlugs(),
 		}
+		status, detail, registeredAt := d.registrationSnapshot()
+		resp["registration_status"] = status
+		resp["registration_error"] = detail
+		if !registeredAt.IsZero() {
+			resp["last_registered_at"] = registeredAt.Format(time.RFC3339)
+		}
 		runtimes := make([]map[string]any, 0, len(d.detected))
 		for _, ri := range d.detected {
 			runtimes = append(runtimes, map[string]any{
@@ -229,6 +240,26 @@ func (d *Daemon) serveHealth(ctx context.Context) {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("health server error", "error", err)
 	}
+}
+
+func (d *Daemon) setRegistrationState(status, detail string) {
+	d.registrationMu.Lock()
+	d.registrationStatus = status
+	d.registrationError = detail
+	if status == "ok" {
+		d.lastRegisteredAt = time.Now()
+	}
+	d.registrationMu.Unlock()
+}
+
+func (d *Daemon) registrationSnapshot() (string, string, time.Time) {
+	d.registrationMu.RLock()
+	defer d.registrationMu.RUnlock()
+	status := d.registrationStatus
+	if status == "" {
+		status = "unknown"
+	}
+	return status, d.registrationError, d.lastRegisteredAt
 }
 
 func normalizeWorkspaceSlugs(values []string, fallback string) []string {
@@ -357,8 +388,12 @@ func (d *Daemon) syncWorkspacesAndRegister(runtimes []protocol.RuntimeInfo) erro
 			if firstErr == nil {
 				firstErr = err
 			}
+			d.setRegistrationState("error", err.Error())
 			slog.Error("workspace registration failed", "workspace", slug, "error", err)
 		}
+	}
+	if firstErr == nil {
+		d.setRegistrationState("ok", "")
 	}
 	return firstErr
 }

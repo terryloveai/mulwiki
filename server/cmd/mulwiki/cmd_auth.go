@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/tethy/mulwiki/server/internal/daemon"
 	"github.com/tethy/mulwiki/server/pkg/protocol"
 )
 
@@ -37,6 +38,12 @@ var authLogoutCmd = &cobra.Command{
 	RunE:  runAuthLogout,
 }
 
+var authRefreshCmd = &cobra.Command{
+	Use:   "refresh",
+	Short: "Refresh stored CLI daemon credentials",
+	RunE:  runAuthRefresh,
+}
+
 func init() {
 	loginCmd.Flags().String("server-url", "", "Mulwiki server URL (env: MULWIKI_SERVER_URL)")
 	loginCmd.Flags().String("workspace", "", "Default workspace slug (env: MULWIKI_WORKSPACE)")
@@ -44,9 +51,48 @@ func init() {
 	loginCmd.Flags().String("password", "", "Login password (env: MULWIKI_PASSWORD)")
 
 	authCmd.AddCommand(authStatusCmd)
+	authCmd.AddCommand(authRefreshCmd)
 	authCmd.AddCommand(authLogoutCmd)
 	rootCmd.AddCommand(loginCmd)
 	rootCmd.AddCommand(authCmd)
+}
+
+func runAuthRefresh(cmd *cobra.Command, _ []string) error {
+	profile := resolveProfile(cmd)
+	cfg, err := loadCLIConfigForProfile(profile)
+	if err != nil {
+		return err
+	}
+	if cfg.SessionID == "" {
+		return fmt.Errorf("not authenticated: run 'mulwiki login' first")
+	}
+	serverURL := strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
+	if serverURL == "" {
+		serverURL = "http://localhost:8080"
+	}
+	daemonID, err := daemon.LoadOrCreateDaemonID(daemonIDPathForProfile(profile))
+	if err != nil {
+		return fmt.Errorf("load daemon id: %w", err)
+	}
+
+	token, err := mintUserDaemonToken(serverURL, cfg.SessionID, daemonID)
+	if err != nil {
+		if cfg.WorkspaceSlug == "" {
+			return fmt.Errorf("refresh daemon token: %w", err)
+		}
+		token, err = mintDaemonToken(serverURL, cfg.SessionID, cfg.WorkspaceSlug, daemonID)
+		if err != nil {
+			return fmt.Errorf("refresh daemon token: %w", err)
+		}
+	}
+	if token == "" {
+		return fmt.Errorf("server returned an empty daemon token")
+	}
+	if err := cacheDaemonTokenForProfile(profile, daemonTokenPathForProfile(profile), serverURL, cfg.WorkspaceSlug, cfg.SessionID, token); err != nil {
+		return err
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "Daemon token refreshed.")
+	return nil
 }
 
 func runLogin(cmd *cobra.Command, _ []string) error {
@@ -117,6 +163,7 @@ func loginWithCredentialsForProfile(profile, serverURL, email, password, workspa
 	cfg.SessionID = sessionID
 	cfg.DaemonToken = ""
 	cfg.DaemonTokens = nil
+	_ = removeDaemonTokenArtifactsForProfile(profile)
 	if workspace != "" {
 		cfg.WorkspaceSlug = workspace
 	}
@@ -215,7 +262,15 @@ func clearCLIAuthForProfile(profile string) error {
 	cfg.SessionID = ""
 	cfg.DaemonToken = ""
 	cfg.DaemonTokens = nil
+	_ = removeDaemonTokenArtifactsForProfile(profile)
 	return saveCLIConfigForProfile(profile, cfg)
+}
+
+func removeDaemonTokenArtifactsForProfile(profile string) error {
+	if err := os.Remove(daemonTokenPathForProfile(profile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func readLine(r io.Reader, prompt string) (string, error) {

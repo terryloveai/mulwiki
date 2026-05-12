@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,6 +45,79 @@ func TestSaveLoadCLIConfigRoundTrip(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("config permissions = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestAuthRefreshMintsUserDaemonTokenAndClearsOldTokens(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var sawCookie bool
+	var sawDaemonID bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/daemon-tokens" {
+			http.NotFound(w, r)
+			return
+		}
+		cookie, err := r.Cookie(sessionCookieName)
+		if err == nil && cookie.Value == "sess-refresh" {
+			sawCookie = true
+		}
+		body := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(body)
+		if strings.Contains(string(body), `"daemon_id":"daemon-refresh"`) {
+			sawDaemonID = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"mwd_refreshed"}`))
+	}))
+	defer server.Close()
+
+	if err := saveCLIConfig(CLIConfig{
+		ServerURL:     server.URL,
+		WorkspaceSlug: "demo",
+		SessionID:     "sess-refresh",
+		DaemonToken:   "mwd_old",
+		DaemonTokens:  map[string]string{"demo": "mwd_old_workspace"},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	daemonIDPath := daemonIDPath()
+	if err := os.MkdirAll(filepath.Dir(daemonIDPath), 0o755); err != nil {
+		t.Fatalf("mkdir daemon dir: %v", err)
+	}
+	if err := os.WriteFile(daemonIDPath, []byte("daemon-refresh\n"), 0o600); err != nil {
+		t.Fatalf("write daemon id: %v", err)
+	}
+	if err := os.WriteFile(daemonTokenPath(), []byte("mwd_old_file\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	cmd := authRefreshCmd
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := runAuthRefresh(cmd, nil); err != nil {
+		t.Fatalf("auth refresh: %v", err)
+	}
+	if !sawCookie || !sawDaemonID {
+		t.Fatalf("request missing expected auth or daemon id, sawCookie=%v sawDaemonID=%v", sawCookie, sawDaemonID)
+	}
+
+	cfg, err := loadCLIConfig()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.DaemonToken != "mwd_refreshed" {
+		t.Fatalf("daemon token = %q, want refreshed", cfg.DaemonToken)
+	}
+	if cfg.DaemonTokens["demo"] != "mwd_refreshed" {
+		t.Fatalf("workspace daemon token = %#v, want refreshed", cfg.DaemonTokens)
+	}
+	data, err := os.ReadFile(daemonTokenPath())
+	if err != nil {
+		t.Fatalf("read daemon token file: %v", err)
+	}
+	if string(data) != "mwd_refreshed\n" {
+		t.Fatalf("daemon token file = %q, want refreshed token", string(data))
 	}
 }
 

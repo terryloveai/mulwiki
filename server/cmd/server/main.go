@@ -366,8 +366,110 @@ func mountWorkspaceRoutes(r chi.Router, db *sql.DB, h *handler.Handler) {
 	})
 }
 
-// runMigrations reads the schema SQL and executes it against the database.
+type schemaMigration struct {
+	version string
+	run     func(*sql.DB) error
+}
+
+var preSchemaMigrations = []schemaMigration{
+	{
+		version: "202605120001_agent_tasks_job_id",
+		run: func(db *sql.DB) error {
+			exists, err := tableExists(db, "agent_tasks")
+			if err != nil || !exists {
+				return err
+			}
+			return ensureColumn(db, "agent_tasks", "job_id", "TEXT NOT NULL DEFAULT ''")
+		},
+	},
+}
+
+var postSchemaMigrations = []schemaMigration{
+	{version: "202605120002_schemas_source_type", run: func(db *sql.DB) error {
+		if err := ensureColumn(db, "schemas", "source_type", "TEXT NOT NULL DEFAULT 'user'"); err != nil {
+			return err
+		}
+		_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_schemas_source_type ON schemas(source_type)`)
+		return err
+	}},
+	{version: "202605120003_workspace_description", run: func(db *sql.DB) error {
+		return ensureColumn(db, "workspaces", "description", "TEXT NOT NULL DEFAULT ''")
+	}},
+	{version: "202605120004_jobs_agent_and_sources", run: func(db *sql.DB) error {
+		if err := ensureColumn(db, "jobs", "agent_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		return ensureColumn(db, "jobs", "source_ids", "TEXT NOT NULL DEFAULT '[]'")
+	}},
+	{version: "202605120005_runtime_model_upgrade", run: func(db *sql.DB) error {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agent_runtimes') WHERE name = 'provider'`).Scan(&count); err == nil && count > 0 {
+			if _, err := db.Exec(`ALTER TABLE agent_runtimes RENAME COLUMN provider TO backend`); err != nil {
+				slog.Warn("migration: rename provider→backend failed (may be safe)", "error", err)
+			}
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agent_runtimes') WHERE name = 'model'`).Scan(&count); err == nil && count > 0 {
+			if _, err := db.Exec(`ALTER TABLE agent_runtimes DROP COLUMN model`); err != nil {
+				slog.Warn("migration: drop model column failed (may be safe)", "error", err)
+			}
+		}
+		for _, col := range []struct {
+			name       string
+			definition string
+		}{
+			{"hostname", "TEXT NOT NULL DEFAULT ''"},
+			{"os", "TEXT NOT NULL DEFAULT ''"},
+			{"version", "TEXT NOT NULL DEFAULT ''"},
+		} {
+			if err := ensureColumn(db, "agent_runtimes", col.name, col.definition); err != nil {
+				return err
+			}
+		}
+		return nil
+	}},
+	{version: "202605120006_agent_tasks_job_index", run: func(db *sql.DB) error {
+		if err := ensureColumn(db, "agent_tasks", "job_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_agent_tasks_job ON agent_tasks(job_id)`)
+		return err
+	}},
+	{version: "202605120007_agent_task_message_resume_fields", run: func(db *sql.DB) error {
+		for _, col := range []struct {
+			name       string
+			definition string
+		}{
+			{"seq", "INTEGER NOT NULL DEFAULT 0"},
+			{"type", "TEXT NOT NULL DEFAULT ''"},
+			{"tool", "TEXT NOT NULL DEFAULT ''"},
+			{"call_id", "TEXT NOT NULL DEFAULT ''"},
+			{"input", "TEXT NOT NULL DEFAULT '{}'"},
+			{"output", "TEXT NOT NULL DEFAULT ''"},
+			{"status", "TEXT NOT NULL DEFAULT ''"},
+			{"level", "TEXT NOT NULL DEFAULT ''"},
+			{"session_id", "TEXT NOT NULL DEFAULT ''"},
+		} {
+			if err := ensureColumn(db, "agent_task_messages", col.name, col.definition); err != nil {
+				return err
+			}
+		}
+		_, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_messages_task_seq ON agent_task_messages(task_id, seq) WHERE seq > 0`)
+		return err
+	}},
+	{version: "202605120008_daemon_tokens_user_scope", run: func(db *sql.DB) error {
+		if err := ensureColumn(db, "daemon_tokens", "user_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		return ensureColumn(db, "daemon_tokens", "scope", "TEXT NOT NULL DEFAULT 'workspace'")
+	}},
+}
+
+// runMigrations applies compatibility migrations, then executes the canonical schema.
 func runMigrations(db *sql.DB) error {
+	if err := runSchemaMigrations(db, preSchemaMigrations); err != nil {
+		return err
+	}
+
 	schemaPath := "pkg/db/schema.sql"
 	// Fallback: try relative to the binary's working directory.
 	schemaSQL, err := os.ReadFile(schemaPath)
@@ -385,80 +487,7 @@ func runMigrations(db *sql.DB) error {
 	if err := backfillWorkspaceMembers(db); err != nil {
 		return err
 	}
-	if err := ensureColumn(db, "schemas", "source_type", "TEXT NOT NULL DEFAULT 'user'"); err != nil {
-		return err
-	}
-	if err := ensureColumn(db, "workspaces", "description", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := ensureColumn(db, "jobs", "agent_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := ensureColumn(db, "jobs", "source_ids", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_schemas_source_type ON schemas(source_type)`); err != nil {
-		return fmt.Errorf("create source_type index: %w", err)
-	}
-	// Migration: v2 → v3 — Runtime model upgrade
-	// Rename provider → backend (only if provider still exists)
-	{
-		var count int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agent_runtimes') WHERE name = 'provider'`).Scan(&count); err == nil && count > 0 {
-			if _, err := db.Exec(`ALTER TABLE agent_runtimes RENAME COLUMN provider TO backend`); err != nil {
-				slog.Warn("migration: rename provider→backend failed (may be safe)", "error", err)
-			}
-		}
-	}
-	// Drop model column (only if it still exists)
-	{
-		var count int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agent_runtimes') WHERE name = 'model'`).Scan(&count); err == nil && count > 0 {
-			if _, err := db.Exec(`ALTER TABLE agent_runtimes DROP COLUMN model`); err != nil {
-				slog.Warn("migration: drop model column failed (may be safe)", "error", err)
-			}
-		}
-	}
-	if err := ensureColumn(db, "agent_runtimes", "hostname", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := ensureColumn(db, "agent_runtimes", "os", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := ensureColumn(db, "agent_runtimes", "version", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := ensureColumn(db, "agent_tasks", "job_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_agent_tasks_job ON agent_tasks(job_id)`); err != nil {
-		return fmt.Errorf("create agent_tasks job index: %w", err)
-	}
-	for _, col := range []struct {
-		name       string
-		definition string
-	}{
-		{"seq", "INTEGER NOT NULL DEFAULT 0"},
-		{"type", "TEXT NOT NULL DEFAULT ''"},
-		{"tool", "TEXT NOT NULL DEFAULT ''"},
-		{"call_id", "TEXT NOT NULL DEFAULT ''"},
-		{"input", "TEXT NOT NULL DEFAULT '{}'"},
-		{"output", "TEXT NOT NULL DEFAULT ''"},
-		{"status", "TEXT NOT NULL DEFAULT ''"},
-		{"level", "TEXT NOT NULL DEFAULT ''"},
-		{"session_id", "TEXT NOT NULL DEFAULT ''"},
-	} {
-		if err := ensureColumn(db, "agent_task_messages", col.name, col.definition); err != nil {
-			return err
-		}
-	}
-	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_messages_task_seq ON agent_task_messages(task_id, seq) WHERE seq > 0`); err != nil {
-		return fmt.Errorf("create agent_task_messages seq index: %w", err)
-	}
-	if err := ensureColumn(db, "daemon_tokens", "user_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := ensureColumn(db, "daemon_tokens", "scope", "TEXT NOT NULL DEFAULT 'workspace'"); err != nil {
+	if err := runSchemaMigrations(db, postSchemaMigrations); err != nil {
 		return err
 	}
 
@@ -469,6 +498,34 @@ func runMigrations(db *sql.DB) error {
 		slog.Warn("schema-to-git migration skipped (non-fatal)", "error", err)
 	}
 
+	return nil
+}
+
+func runSchemaMigrations(db *sql.DB, migrations []schemaMigration) error {
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version TEXT PRIMARY KEY,
+			applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)
+	`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	for _, migration := range migrations {
+		var applied int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&applied); err != nil {
+			return fmt.Errorf("check migration %s: %w", migration.version, err)
+		}
+		if applied > 0 {
+			continue
+		}
+		if err := migration.run(db); err != nil {
+			return fmt.Errorf("apply migration %s: %w", migration.version, err)
+		}
+		if _, err := db.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, migration.version); err != nil {
+			return fmt.Errorf("record migration %s: %w", migration.version, err)
+		}
+	}
 	return nil
 }
 
@@ -605,6 +662,18 @@ func ensureColumn(db *sql.DB, table, column, definition string) error {
 		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
+}
+
+func tableExists(db *sql.DB, table string) (bool, error) {
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check table %s: %w", table, err)
+	}
+	return true, nil
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {

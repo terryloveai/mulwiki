@@ -55,19 +55,61 @@ func TestResolveDaemonTokenMissingIsEmpty(t *testing.T) {
 	}
 }
 
-func TestResolveDaemonTokenForStartUsesCachedCLIWorkspaceToken(t *testing.T) {
+func TestResolveDaemonTokenForStartRefreshesCachedTokenWhenSessionExists(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MULWIKI_DAEMON_TOKEN", "")
+	var mintCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/daemon-tokens" {
+			http.NotFound(w, r)
+			return
+		}
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil || cookie.Value != "sess-daemon" {
+			t.Fatalf("missing session cookie: %v %#v", err, cookie)
+		}
+		mintCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"mwd_fresh"}`))
+	}))
+	defer server.Close()
+
 	cfg := CLIConfig{
+		ServerURL:     server.URL,
 		WorkspaceSlug: "demo",
+		SessionID:     "sess-daemon",
+		DaemonToken:   "mwd_old-global",
 		DaemonTokens:  map[string]string{"demo": "mwd_cached"},
 	}
+	if err := saveCLIConfig(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
 
-	token, err := resolveDaemonTokenForStart("", filepath.Join(t.TempDir(), "missing-token"), cfg, "demo", "daemon-1", "http://example.invalid")
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("mwd_old-file\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	token, err := resolveDaemonTokenForStart("", tokenPath, cfg, "demo", "daemon-1", server.URL)
 	if err != nil {
 		t.Fatalf("resolve token: %v", err)
 	}
-	if token != "mwd_cached" {
-		t.Fatalf("token = %q, want cached token", token)
+	if token != "mwd_fresh" || mintCount != 1 {
+		t.Fatalf("token=%q mintCount=%d, want fresh token minted once", token, mintCount)
+	}
+
+	loaded, err := loadCLIConfig()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if loaded.DaemonToken != "mwd_fresh" || loaded.DaemonTokens["demo"] != "mwd_fresh" {
+		t.Fatalf("fresh token was not cached: %#v", loaded)
+	}
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if string(data) != "mwd_fresh\n" {
+		t.Fatalf("token file = %q, want fresh token", string(data))
 	}
 }
 
@@ -119,6 +161,49 @@ func TestResolveDaemonTokenForStartMintsAndCachesWithCLISession(t *testing.T) {
 	}
 	if loaded.DaemonTokens["demo"] != "mwd_minted" {
 		t.Fatalf("minted token was not cached: %#v", loaded.DaemonTokens)
+	}
+}
+
+func TestResolveDaemonTokenForStartPreservesDefaultWorkspaceWhenAutoDiscovering(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MULWIKI_DAEMON_TOKEN", "")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/daemon-tokens" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"mwd_auto"}`))
+	}))
+	defer server.Close()
+
+	cfg := CLIConfig{
+		ServerURL:     server.URL,
+		WorkspaceSlug: "demo",
+		SessionID:     "sess-auto",
+	}
+	if err := saveCLIConfig(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	token, err := resolveDaemonTokenForStart("", filepath.Join(t.TempDir(), "token"), cfg, "", "daemon-1", server.URL)
+	if err != nil {
+		t.Fatalf("resolve token: %v", err)
+	}
+	if token != "mwd_auto" {
+		t.Fatalf("token = %q, want minted token", token)
+	}
+
+	loaded, err := loadCLIConfig()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if loaded.WorkspaceSlug != "demo" {
+		t.Fatalf("workspace slug was cleared: %#v", loaded)
+	}
+	if loaded.DaemonTokens["demo"] != "mwd_auto" {
+		t.Fatalf("daemon token not cached for default workspace: %#v", loaded.DaemonTokens)
 	}
 }
 
