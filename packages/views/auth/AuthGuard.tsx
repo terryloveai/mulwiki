@@ -2,8 +2,8 @@
 
 import { Suspense, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { meOptions } from "@mulwiki/core/queries";
+import { useAppNavigation } from "../navigation";
 import { Spinner } from "@mulwiki/ui/components/Spinner";
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -15,17 +15,14 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
 }
 
 function AuthGuardInner({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
+  const navigation = useAppNavigation();
   const { isError, isSuccess } = useQuery(meOptions());
 
   useEffect(() => {
     if (!isError) return;
-    const query = searchParams.toString();
-    const next = `${pathname}${query ? `?${query}` : ""}`;
-    router.replace(`/login?next=${encodeURIComponent(next)}`);
-  }, [isError, pathname, router, searchParams]);
+    const next = `${navigation.currentPath || "/"}${navigation.currentSearch ? `?${navigation.currentSearch}` : ""}`;
+    navigation.replace(`/login?next=${encodeURIComponent(next)}`);
+  }, [isError, navigation]);
 
   if (isSuccess) {
     return <>{children}</>;

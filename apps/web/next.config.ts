@@ -7,6 +7,7 @@ const apiBaseUrl = (
 ).replace(/\/$/, "");
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   transpilePackages: ["@mulwiki/core", "@mulwiki/ui"],
   async rewrites() {
     return {

@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
 import { api } from "@mulwiki/core/api";
 import { queryKeys, schemaQueries, workspaceQueries } from "@mulwiki/core/queries";
 import { Button } from "@mulwiki/ui/components/Button";
@@ -10,9 +9,10 @@ import { Input } from "@mulwiki/ui/components/Input";
 import { Spinner } from "@mulwiki/ui/components/Spinner";
 import { cn } from "@mulwiki/ui/lib/cn";
 import { FolderOpen, Plus } from "lucide-react";
+import { useAppNavigation } from "../navigation";
 
 export function WorkspacesView() {
-  const router = useRouter();
+  const navigation = useAppNavigation();
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
@@ -42,7 +42,7 @@ export function WorkspacesView() {
       setSchemaMode("blank");
       setSelectedSchemaPath("");
       setShowForm(false);
-      router.push(`/${workspace.slug}/wiki`);
+      navigation.push(`/${workspace.slug}/wiki`);
     },
   });
 
@@ -167,7 +167,7 @@ export function WorkspacesView() {
           {workspaces.map((workspace) => (
             <li key={workspace.id}>
               <button
-                onClick={() => router.push(`/${workspace.slug}/wiki`)}
+                onClick={() => navigation.push(`/${workspace.slug}/wiki`)}
                 className={cn(
                   "flex w-full items-center gap-4 rounded-lg border border-border bg-card p-4",
                   "text-left transition-colors hover:bg-accent hover:text-accent-foreground",

@@ -110,10 +110,22 @@ CLI 会把本地 session 存到 `~/.mulwiki/config.json`。daemon 使用这个 s
 ```bash
 pnpm typecheck
 pnpm build
+make package-current
 
 cd server
 go test ./...
 ```
+
+## 部署
+
+安装到第三方服务器时，建议先构建发布包，不要使用 `go run`：
+
+```bash
+pnpm install
+make package-current
+```
+
+发布包包含 Go server、CLI/daemon 二进制、Next.js standalone Web server、内置 schemas/skills 和部署文档。Mulwiki 通过 CGO 使用 SQLite，所以跨平台 Go 二进制需要目标平台的 C 编译器；最稳定的方式是在目标系统或匹配的 CI runner 上构建。详见 [docs/deployment.md](docs/deployment.md)。
 
 ## 仓库结构
 

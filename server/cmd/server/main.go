@@ -470,15 +470,9 @@ func runMigrations(db *sql.DB) error {
 		return err
 	}
 
-	schemaPath := "pkg/db/schema.sql"
-	// Fallback: try relative to the binary's working directory.
-	schemaSQL, err := os.ReadFile(schemaPath)
+	schemaSQL, err := readSchemaSQL()
 	if err != nil {
-		// Try from the server/ directory.
-		schemaSQL, err = os.ReadFile("../../pkg/db/schema.sql")
-		if err != nil {
-			return fmt.Errorf("read schema.sql: %w", err)
-		}
+		return err
 	}
 
 	if _, err := db.Exec(string(schemaSQL)); err != nil {
@@ -499,6 +493,32 @@ func runMigrations(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+func readSchemaSQL() ([]byte, error) {
+	if path := strings.TrimSpace(os.Getenv("SCHEMA_SQL_PATH")); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read schema.sql from SCHEMA_SQL_PATH: %w", err)
+		}
+		return data, nil
+	}
+
+	candidates := []string{
+		"pkg/db/schema.sql",
+		"server/pkg/db/schema.sql",
+		"../../pkg/db/schema.sql",
+	}
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return data, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("read schema.sql from %s: %w", path, err)
+		}
+	}
+	return nil, fmt.Errorf("read schema.sql: checked %s", strings.Join(candidates, ", "))
 }
 
 func runSchemaMigrations(db *sql.DB, migrations []schemaMigration) error {
