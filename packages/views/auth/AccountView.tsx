@@ -1,12 +1,12 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
 import { api } from "@mulwiki/core/api";
 import { meOptions } from "@mulwiki/core/queries";
 import { Button } from "@mulwiki/ui/components/Button";
 import { Spinner } from "@mulwiki/ui/components/Spinner";
 import { LogOut, UserRound } from "lucide-react";
+import { useAppNavigation } from "../navigation";
 
 function formatDate(value?: string) {
   if (!value) return "-";
@@ -17,7 +17,7 @@ function formatDate(value?: string) {
 }
 
 export function AccountView() {
-  const router = useRouter();
+  const navigation = useAppNavigation();
   const queryClient = useQueryClient();
   const { data: user, isLoading } = useQuery(meOptions());
 
@@ -25,7 +25,7 @@ export function AccountView() {
     mutationFn: () => api.logout(),
     onSuccess: () => {
       queryClient.clear();
-      router.replace("/login");
+      navigation.replace("/login");
     },
   });
 
@@ -63,7 +63,7 @@ export function AccountView() {
       </section>
 
       <div className="mt-6 flex items-center justify-between gap-3">
-        <Button type="button" variant="outline" onClick={() => router.push("/workspaces")}>
+        <Button type="button" variant="outline" onClick={() => navigation.push("/workspaces")}>
           Workspaces
         </Button>
         <Button

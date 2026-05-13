@@ -111,10 +111,22 @@ When started without `--workspace`, the daemon discovers all workspaces availabl
 ```bash
 pnpm typecheck
 pnpm build
+make package-current
 
 cd server
 go test ./...
 ```
+
+## Deployment
+
+For third-party servers, build a release package instead of using `go run`:
+
+```bash
+pnpm install
+make package-current
+```
+
+The package includes the Go server, CLI/daemon binary, Next.js standalone web server, built-in schemas and skills, and deployment docs. Mulwiki uses SQLite through CGO, so cross-platform Go binaries require a target C compiler; the most reliable path is to build on the target OS or in a matching CI runner. See [docs/deployment.md](docs/deployment.md).
 
 ## Repository Map
 

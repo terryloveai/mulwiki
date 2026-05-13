@@ -3,6 +3,8 @@ package main
 import (
 	"database/sql"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -213,6 +215,32 @@ func TestRunMigrationsAddsAgentTaskJobIDBeforeSchemaIndexes(t *testing.T) {
 	}
 	if indexedColumn != "job_id" {
 		t.Fatalf("index column = %q, want job_id", indexedColumn)
+	}
+}
+
+func TestReadSchemaSQLFindsPackagedServerPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "server", "pkg", "db"), 0o755); err != nil {
+		t.Fatalf("create package schema dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "server", "pkg", "db", "schema.sql"), []byte("SELECT 1;"), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get wd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	data, err := readSchemaSQL()
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	if string(data) != "SELECT 1;" {
+		t.Fatalf("schema content = %q", string(data))
 	}
 }
 

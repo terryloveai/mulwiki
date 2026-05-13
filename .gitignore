@@ -3,6 +3,8 @@ node_modules
 .turbo
 *.tsbuildinfo
 .worktrees
+.build
+dist
 mulwiki.db
 server/data/repos
 server/internal/handler/data/

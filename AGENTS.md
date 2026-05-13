@@ -35,12 +35,13 @@ Mulwiki intentionally follows Multica's boundary shape, not its full stack:
 - Design durable core business capabilities in this order: Server API, CLI, then Web UI. The server API is the authoritative capability layer; CLI is for automation, scripting, daemon workflows, and advanced users; Web UI is for interaction, visualization, and low-friction access.
 - Before adding a feature, identify the server API that owns it, the CLI command that exposes it for scripts/CI/agents, and the Web UI that calls the same API. Do not create Web-only business capabilities unless the behavior is purely presentational.
 - CLI commands for durable capabilities should be non-interactive by default, support `--output json` where automation needs it, and return non-zero on failures.
+- Follow [docs/architecture/platform-view-boundaries.md](docs/architecture/platform-view-boundaries.md) for Web, shared views, and future desktop app boundaries. Page-level product UI belongs in `packages/views`; `apps/web/app` route files should stay thin Next.js adapters.
 - Keep chi route groups as the backend composition boundary. Public auth and health routes are explicit; workspace routes must run through Auth, Workspace, then Role middleware.
 - Treat `workspace_members` as the tenant boundary. A request is workspace-scoped only after membership has been resolved into context.
 - Keep handlers thin. Handlers decode HTTP, call service/store code, publish events, and serialize responses.
 - Put lifecycle rules in services. Claiming, dispatching, completing, failing, and retrying jobs or agent tasks should not be duplicated in handlers and daemon code.
 - Keep schema Markdown decoupled from agents. Ingest combines Sources + Schema + Agent at job/task creation time.
-- Use `packages/core` for API clients, query keys, query options, hooks, and shared types. Use `packages/views` for page-level React components. `apps/web/app` route files should be thin route adapters.
+- Use `packages/core` for API clients, query keys, query options, hooks, and shared types. Use `packages/views` for platform-neutral page-level React components. Shared views must not import `next/*`, Electron APIs, or app-shell-specific routing directly.
 - Use React Query as the source of truth for server state. Do not introduce a separate client store for data fetched from the API.
 
 Do not port Multica details that do not fit Mulwiki's current shape: PostgreSQL, Redis queues, desktop window orchestration, GORM, or model selection at runtime level.
